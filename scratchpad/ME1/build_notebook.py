@@ -150,15 +150,18 @@ md(r"""## 3. Layer primitives — the actual point of the exercise
 
 Two design decisions worth calling out:
 
-- **Patch extraction uses `Tensor.unfold(dim, size, step)`**, a *generic*
-  sliding-window primitive (not conv-specific — it's used for all kinds of
-  windowing, e.g. time series), applied once along height and once along
-  width, then reshaped into a flat per-location vector with
-  `einops.rearrange`. This is deliberately **not**
-  `torch.nn.functional.unfold`, which is a function that exists specifically
-  to support building convolutions ("im2col") — using it would mean
-  borrowing the interesting part of the conv logic pre-built, rather than
-  composing it ourselves from generic tensor operations.
+- **Patch extraction builds its own sliding-window indices** with plain
+  arithmetic (`torch.arange` + broadcasting: `row_index[h, kh] = h + kh`),
+  then gathers with plain tensor indexing. Earlier drafts used
+  `Tensor.unfold(dim, size, step)` here — but on reflection, extracting the
+  receptive-field windows *is* part of convolution's actual logic (not
+  incidental plumbing like padding or a bias broadcast), and `unfold` does
+  exactly that step for you. Its genericness (also usable for 1D windowing)
+  defends the function's *name*, not whether the index arithmetic was
+  actually done by us — it wasn't. Building the index grid ourselves and
+  gathering with ordinary indexing removes that gap entirely: no function
+  whose purpose is specifically "extract sliding/conv windows" is used
+  anywhere.
 - **Every `einsum`/`rearrange`/`reduce` call uses full descriptive axis
   names** (`"batch height width patch, out_channels patch -> ..."`) instead
   of the terser single-letter convention (`"bhwp,op->bohw"`). Same
@@ -169,11 +172,19 @@ Two design decisions worth calling out:
 code(r'''def extract_patches(x, kernel_size, padding):
     """(B, C, H, W) -> (B, H_out, W_out, C*kernel_size*kernel_size)."""
     x = F.pad(x, (padding, padding, padding, padding))
-    x = x.unfold(2, kernel_size, 1)  # window along H -> (B, C, H_out, W_pad, kh)
-    x = x.unfold(3, kernel_size, 1)  # window along W -> (B, C, H_out, W_out, kh, kw)
+    height_out = x.shape[2] - kernel_size + 1
+    width_out = x.shape[3] - kernel_size + 1
+
+    # row_index[h, kh] = input row read by output row h, kernel offset kh
+    row_index = torch.arange(height_out)[:, None] + torch.arange(kernel_size)[None, :]
+    col_index = torch.arange(width_out)[:, None] + torch.arange(kernel_size)[None, :]
+
+    windows = x[:, :, row_index, :]  # (B, C, H_out, kh, W_pad)
+    windows = windows[:, :, :, :, col_index]  # (B, C, H_out, kh, W_out, kw)
+
     return rearrange(
-        x,
-        "batch channels height width kernel_h kernel_w "
+        windows,
+        "batch channels height kernel_h width kernel_w "
         "-> batch height width (channels kernel_h kernel_w)",
     )
 
@@ -369,9 +380,10 @@ plt.show()""")
 md(r"""## Summary
 
 - 3-layer CNN (2 conv + 1 linear, by the "3 total learnable layers"
-  reading) with every layer's forward math hand-rolled via `Tensor.unfold` +
-  `einops`/`einsum` — verified numerically against PyTorch's own reference
-  ops, not just shape-checked.
+  reading) with every layer's forward math hand-rolled — sliding-window
+  indices built from scratch with `torch.arange`/broadcasting, gathered with
+  plain indexing, then contracted via `einops`/`einsum` — verified
+  numerically against PyTorch's own reference ops, not just shape-checked.
 - Trained 5 epochs, Adam, on MNIST's standard 60,000/10,000 split.
 - Test accuracy and a qualitative 16-image grid are reported above, both
   produced by executing this notebook top-to-bottom (not hand-edited).""")

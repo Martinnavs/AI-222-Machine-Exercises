@@ -6,16 +6,25 @@ from einops import einsum, rearrange, reduce
 def extract_patches(x, kernel_size, padding):
     """(B, C, H, W) -> (B, H_out, W_out, C*kernel_size*kernel_size).
 
-    Generic sliding-window extraction (Tensor.unfold is not conv-specific —
-    it's just "give me overlapping windows along one dimension"), reshaped
-    into a flat per-location vector with einops.
+    Builds the sliding-window indices ourselves with plain arithmetic
+    (torch.arange + broadcasting), then gathers with plain tensor indexing —
+    no function whose purpose is specifically "extract conv/sliding windows"
+    (e.g. Tensor.unfold or F.unfold) is used anywhere here.
     """
     x = F.pad(x, (padding, padding, padding, padding))
-    x = x.unfold(2, kernel_size, 1)  # window along H -> (B, C, H_out, W_pad, kh)
-    x = x.unfold(3, kernel_size, 1)  # window along W -> (B, C, H_out, W_out, kh, kw)
+    height_out = x.shape[2] - kernel_size + 1
+    width_out = x.shape[3] - kernel_size + 1
+
+    # row_index[h, kh] = input row read by output row h, kernel offset kh
+    row_index = torch.arange(height_out)[:, None] + torch.arange(kernel_size)[None, :]
+    col_index = torch.arange(width_out)[:, None] + torch.arange(kernel_size)[None, :]
+
+    windows = x[:, :, row_index, :]  # (B, C, H_out, kh, W_pad)
+    windows = windows[:, :, :, :, col_index]  # (B, C, H_out, kh, W_out, kw)
+
     return rearrange(
-        x,
-        "batch channels height width kernel_h kernel_w "
+        windows,
+        "batch channels height kernel_h width kernel_w "
         "-> batch height width (channels kernel_h kernel_w)",
     )
 
