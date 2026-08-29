@@ -1,0 +1,16 @@
+name: ai222-me1
+channels:
+  - pytorch
+  - nvidia
+  - conda-forge
+dependencies:
+  - python=3.11
+  - pytorch
+  - torchvision
+  - pytorch-cuda=12.4
+  - einops
+  - matplotlib
+  - numpy
+  - jupyter
+  - nbformat
+  - ipykernel
