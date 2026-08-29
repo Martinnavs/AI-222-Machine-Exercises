@@ -1,0 +1,15 @@
+# AI-only planning docs (not part of any submission)
+claude-independent-plan/
+
+# Dev/iteration sandbox (final deliverables live in the exercise dirs, e.g. ME1/)
+scratchpad/
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+.ipynb_checkpoints/
+
+# Datasets pulled at runtime
+data/
+MNIST/
