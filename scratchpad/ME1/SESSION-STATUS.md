@@ -1,5 +1,19 @@
 # ME1 session status — handoff memo
 
+**RESOLVED — ME1 is fully complete.** This memo was written mid-session as a
+handoff snapshot; everything under "What's left to build" below was finished
+afterward. See `LEARNINGS-AND-GAPS.md` in this same directory for the actual
+closeout doc (final decisions, learnings, gaps vs. the original plan). Kept
+below as-is for historical record rather than rewritten. Notably, patch
+extraction was further revised *after* this memo: `Tensor.unfold` (mentioned
+below) was replaced with hand-built window indices
+(`torch.arange`+broadcasting) + plain indexing, following a stricter
+TISO-compliance audit — see `layers.py` and `LEARNINGS-AND-GAPS.md` for why.
+The three quiz questions listed below are also stale for the same reason:
+question 1 (`.unfold(2)` vs `.unfold(3)` ordering) no longer applies since
+that code doesn't exist anymore; questions 2 and 3 still apply to the
+current implementation unchanged.
+
 Written because the student is having network/power issues and asked to pause
 live collaboration; capturing full state here (on the `backup/scratchpad-and-plan`
 branch) before continuing solo on the implementation, so nothing is lost if this
