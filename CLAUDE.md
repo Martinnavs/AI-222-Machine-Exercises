@@ -48,6 +48,19 @@ This was established during ME1 and should carry forward:
    own original plan.
 6. Commit the exercise's `environment.yml` and final notebook to `master`.
 
+## Mirroring learnings docs to the Obsidian vault
+
+Any "learnings-style" doc written during an exercise — the closeout
+recap from step 5 above, *and* any ad-hoc teaching primer/worked-example
+doc generated mid-session (e.g. to walk through a tricky piece of code with
+concrete numbers) — should also be mirrored (copied, not moved; the
+scratchpad copy stays authoritative and gitignored) into the Obsidian vault
+at `/mnt/Obsidian/PhD/AI-222/<ME>/`, one file per doc, filename unchanged.
+This does not apply to plain working notes/prototype `.py` modules — just
+docs meant to build lasting conceptual understanding. Established during
+ME1 (see `scratchpad/ME1/patch-extraction-primer.md` and
+`/mnt/Obsidian/PhD/AI-222/ME1/patch-extraction-primer.md`).
+
 ## Conda environment conventions (shared HPC node)
 
 - One conda env per exercise, created with an explicit `--prefix` under the

@@ -131,15 +131,24 @@ data downloaded successfully, batch shapes confirmed correct).
 
 ## Quiz question(s) left unanswered when we paused
 
-Asked, not yet answered — worth circling back to with the student later, purely
-for their own understanding (does not block implementation):
+**RESOLVED** — walked through all three in a later session, re-derived
+against the current `Tensor.unfold`-free implementation. Full answers with
+worked numeric examples in `patch-extraction-primer.md` §7 (and §§1–4 for
+the underlying fancy-indexing mechanics). Quick summary:
 
-1. Why does `.unfold(2, ...)` (height) have to run before `.unfold(3, ...)`
-   (width) in `extract_patches` — does order matter?
-2. Why is `bias[None, :, None, None]` the correct broadcast shape against
-   `(batch, out_channels, height, width)`, not `bias[None, None, None, :]`?
-3. What class of bug would a shape-only check (skipping `torch.allclose`
-   against the PyTorch reference ops) have missed?
+1. Whether `.unfold`-style order matters is moot now (`Tensor.unfold` is
+   gone), but the underlying question carries over to `row_index`/
+   `col_index`: order doesn't matter in the "which line runs first" sense —
+   what matters is each index hitting the axis it was derived from. See
+   primer §4 for a non-square case that crashes if you get this wrong.
+2. `bias[None, :, None, None]` puts `bias`'s real axis in slot 1, matching
+   `out`'s `out_channels` axis. `bias[None, None, None, :]` would target
+   `width` instead — crashes outright in the real model, or silently adds
+   a per-column offset if sizes ever coincided. Primer §7.
+3. A shape-only check misses any bug where two axes being paired/merged/
+   reordered coincidentally have matching sizes — right shape, silently
+   wrong values (mismatched einsum flatten order, transposed output axes).
+   Primer §3 and §7.
 
 ## What's left to build (proceeding solo from here, per student's go-ahead)
 
