@@ -1,0 +1,9 @@
+.venv/
+vendor/
+models/
+out/
+.pytest_cache/
+__pycache__/
+*.pyc
+personas.json
+personas/
