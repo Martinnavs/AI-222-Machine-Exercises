@@ -9,8 +9,12 @@ COSYVOICE_SHA := 074ca6dc9e80a2f424f1f74b48bdd7d3fea531cc
 BACKEND ?= cosyvoice2
 TEXT ?=
 MANIFEST ?= personas.json
+RAW_DIR ?= $(HOME)/cosy-voice-data/Raw_Audio
+REFS_DIR ?= $(HOME)/cosy-voice-data/References
+RESYNTH_PROB ?= 0.3
+SEED ?=
 
-.PHONY: sync vendor download-model generate generate-personas test clean
+.PHONY: sync vendor download-model generate generate-personas generate-conversions test clean
 
 sync:
 	$(UV) sync
@@ -33,6 +37,9 @@ generate:
 
 generate-personas:
 	$(UV) run python -m me2_voicegen.generate_personas --manifest "$(MANIFEST)" --backend $(BACKEND) --text "$(TEXT)"
+
+generate-conversions:
+	$(UV) run python -m me2_voicegen.generate_conversions --raw-dir "$(RAW_DIR)" --refs-dir "$(REFS_DIR)" --backend $(BACKEND) --resynth-prob $(RESYNTH_PROB) $(if $(SEED),--seed $(SEED))
 
 test:
 	$(UV) run pytest

@@ -96,3 +96,26 @@ class CosyVoice2Synthesizer(Synthesizer):
             audio = audio[np.newaxis, :]
 
         return SynthesisResult(audio=audio, sample_rate=self._model.sample_rate)
+
+    def convert_voice(self, source_wav_path: str, prompt_wav_path: str) -> SynthesisResult:
+        """Voice conversion (no text): re-renders source_wav_path's own speech
+        content in prompt_wav_path's timbre via CosyVoice2's inference_vc. Not
+        part of the Synthesizer ABC (that contract is text-in) - this is an
+        additional capability specific to this backend, discovered via
+        getattr() the same way DEFAULT_PROMPT_WAV is, so a backend without it
+        simply doesn't support voice conversion."""
+        import torch
+
+        chunks = [
+            chunk["tts_speech"]
+            for chunk in self._model.inference_vc(source_wav_path, prompt_wav_path)
+        ]
+        if not chunks:
+            raise RuntimeError("CosyVoice2 inference_vc yielded no audio chunks")
+
+        audio_tensor = torch.cat(chunks, dim=-1)
+        audio = audio_tensor.detach().cpu().numpy().astype(np.float32)
+        if audio.ndim == 1:
+            audio = audio[np.newaxis, :]
+
+        return SynthesisResult(audio=audio, sample_rate=self._model.sample_rate)
