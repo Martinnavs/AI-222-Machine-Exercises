@@ -1,11 +1,18 @@
 """Real, end-to-end slow test for the persona-batch CLI path (Ticket 02 of the
 persona-batch-generation plan).
 
-Runs the REAL synthesis path through the factory against the real downloaded
-CosyVoice2-0.5B weights and the real GPU, using a 2-entry persona manifest
-built in tmp_path from the vendored zero_shot_prompt.wav asset - no mocking of
-CosyVoice internals, AutoModel, or ONNX Runtime. Skipped (not failed) when the
-weights or the vendored asset aren't present on this machine, mirroring
+Invokes the actual shipped entry point, `me2_voicegen.generate_personas.main()`,
+with real CLI-style argv - not a hand-rolled loop over the library pieces -
+against the real downloaded CosyVoice2-0.5B weights and the real GPU, using a
+2-entry persona manifest built in tmp_path from the vendored
+zero_shot_prompt.wav asset. No mocking of CosyVoice internals, AutoModel,
+ONNX Runtime, or of any part of generate_personas.py itself: argument parsing,
+the shared-run-timestamp output naming, the per-persona try/except handling,
+and the exit code all run for real here (R3-1 review fix - the prior version
+of this test only exercised load_personas/create_synthesizer/synthesize/
+save_wav directly and left the real CLI entry point with no automated
+real-GPU regression coverage). Skipped (not failed) when the weights or the
+vendored asset aren't present on this machine, mirroring
 tests/test_end_to_end_slow.py's skip pattern, since that's an environment
 precondition, not a code defect.
 
@@ -29,11 +36,9 @@ import numpy as np
 import pytest
 import soundfile as sf
 
+from me2_voicegen import generate_personas
 from me2_voicegen.download_model import missing_manifest_entries, target_dir
-from me2_voicegen.personas import load_personas
-from me2_voicegen.synthesis.base import save_wav
 from me2_voicegen.synthesis.cosyvoice2_backend import CosyVoice2Synthesizer
-from me2_voicegen.synthesis.factory import create_synthesizer
 
 pytestmark = pytest.mark.slow
 
@@ -61,7 +66,7 @@ def _skip_reasons() -> list[str]:
         "Not mocked per this test's explicit scope."
     ),
 )
-def test_persona_batch_produces_distinct_wavs_from_single_model_load(
+def test_persona_batch_cli_produces_distinct_wavs_from_single_model_load(
     tmp_path: Path,
 ) -> None:
     manifest_path = tmp_path / "personas.json"
@@ -84,36 +89,40 @@ def test_persona_batch_produces_distinct_wavs_from_single_model_load(
         )
     )
 
-    personas = load_personas(manifest_path)
-    assert len(personas) == 2
-
-    synthesizer = create_synthesizer(
-        "cosyvoice2", model_dir=str(target_dir()), fp16=False
-    )
-    assert isinstance(synthesizer, CosyVoice2Synthesizer)
-
-    text = "Hey computer, could you please turn on the lights in the living room?"
     out_dir = tmp_path / "out"
-    out_paths: list[Path] = []
+    text = "Hey computer, could you please turn on the lights in the living room?"
 
-    for persona in personas:
-        result = synthesizer.synthesize(text, prompt=persona.prompt)
-        assert result.sample_rate == 24000
-        assert result.audio.dtype == np.float32
-        assert result.audio.shape[-1] > 0
+    exit_code = generate_personas.main(
+        [
+            "--manifest",
+            str(manifest_path),
+            "--backend",
+            "cosyvoice2",
+            "--text",
+            text,
+            "--out-dir",
+            str(out_dir),
+            "--opt",
+            f"model_dir={target_dir()}",
+            "--opt",
+            "fp16=false",
+        ]
+    )
 
-        out_path = out_dir / f"sample_{persona.name}.wav"
-        save_wav(result, out_path)
-        out_paths.append(out_path)
+    assert exit_code == 0
 
-    assert len(out_paths) == 2
-    assert out_paths[0] != out_paths[1]
-    assert out_paths[0].name != out_paths[1].name
+    wavs = sorted(out_dir.glob("sample_*.wav"))
+    assert len(wavs) == 2
+    assert any(p.name.startswith("sample_english_woman_") for p in wavs)
+    assert any(p.name.startswith("sample_indian_man_") for p in wavs)
+    assert wavs[0].name != wavs[1].name
 
-    for out_path in out_paths:
-        assert out_path.exists()
-        data, sr = sf.read(str(out_path), dtype="float32")
+    timestamps = {p.name.rsplit("_", 1)[-1] for p in wavs}
+    assert len(timestamps) == 1
+
+    for wav_path in wavs:
+        data, sr = sf.read(str(wav_path), dtype="float32")
         assert sr == 24000
         assert len(data) > 0
         rms = np.sqrt(np.mean(data.astype(np.float64) ** 2))
-        assert rms > 0.0, f"{out_path} is silent (RMS == 0)"
+        assert rms > 0.0, f"{wav_path} is silent (RMS == 0)"
