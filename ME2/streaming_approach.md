@@ -61,3 +61,7 @@ Because each inference takes under 5 ms, running it every 100 ms consumes less t
 * **Audio Buffer Underrun**:
 * *Problem*: Running model inference inside the audio driver's callback blocks the stream, causing dropped audio frames (ALSA buffer underruns).
 * *Fix*: Decouple capture and inference. Let the sound callback only push raw bytes into a thread-safe `collections.deque(maxlen=24000)`, while a separate worker thread or process reads the buffer and executes inference.
+
+
+To check: 
+https://github.com/google-research/google-research/tree/master/kws_streaming#training-on-custom-data
