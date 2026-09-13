@@ -43,6 +43,20 @@ def test_generate_sample_help_exits_cleanly_without_vendor_or_gpu() -> None:
     assert "cosyvoice" not in sys.modules
 
 
+def test_generate_personas_help_exits_cleanly_without_vendor_or_gpu() -> None:
+    """Same regression guard as test_generate_sample_help_exits_cleanly_..., for
+    the new persona-batch CLI (Ticket 01 of persona-batch-generation) - nothing
+    stops a later change from reintroducing a module-level vendor import here
+    either."""
+    from me2_voicegen import generate_personas
+
+    with pytest.raises(SystemExit) as exc_info:
+        generate_personas.parse_args(["--help"])
+
+    assert exc_info.value.code == 0
+    assert "cosyvoice" not in sys.modules
+
+
 def test_cosyvoice2_backend_module_import_alone_does_not_touch_vendor() -> None:
     """Importing the backend module (as opposed to instantiating the class)
     must not eagerly import the vendor package - only __init__ may do that."""

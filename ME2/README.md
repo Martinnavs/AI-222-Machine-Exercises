@@ -16,15 +16,24 @@ pipeline itself.
 
 **Explicitly NOT in scope (later work):**
 - The full synthetic-data-generation pipeline for the wake-word/KWS corpus.
-- Batch/looped generation over a phrase list.
+- Batch/looped generation over a **phrase list** — i.e. multiple *texts* in one run. Still not
+  supported: `generate_personas.py` (below) synthesizes exactly one text per run, never a list of
+  texts.
 - Phonetic adversaries (near-miss wake-word variants).
 - Noise/RIR augmentation of generated clips.
 - A second backend implementation (the interface is designed to make one easy to add later —
   see `docs/adding-a-tts-backend.md` — but none is implemented here).
 
-See `sources.md`, `potential_model_approach.md`, `voice_generation_approach.md`, and
-`streaming_approach.md` in this directory for the original planning context (read-only —
-not updated by this spike).
+**Now in scope (added after the initial spike):**
+- Batching one text over multiple *personas* (multiple reference voices/manifests) in a single
+  run, sharing one backend construction — see "Batch generation over personas" below. This is a
+  different axis from the phrase-list batching above (personas vary, not text) and does not
+  contradict it.
+
+See `docs/raw_requirements/sources.md`, `docs/raw_requirements/potential_model_approach.md`,
+`docs/raw_requirements/voice_generation_approach.md`, and
+`docs/raw_requirements/streaming_approach.md` for the original planning context (read-only — not
+updated by this spike).
 
 ## Prerequisites
 
@@ -175,6 +184,131 @@ uv run python -m me2_voicegen.generate_sample \
 - Because the interface is genuinely swappable this way, a future backend (e.g. Piper, XTTS-v2)
   plugs in without touching this CLI file at all — see `docs/adding-a-tts-backend.md`.
 
+## Batch generation over personas
+
+`generate_personas.py` synthesizes **one text, once per persona**, from a JSON manifest of
+personas — each persona is a reference (voice-cloning) wav plus its exact transcript — building
+the backend exactly once and reusing it across the whole batch. This is the "batching over
+personas" case described in Scope above; it does not add phrase-list (multiple-text) batching.
+
+### Manifest schema
+
+```json
+{
+  "personas": [
+    {
+      "name": "english_woman",
+      "wav_path": "personas/english_woman.wav",
+      "text": "Replace this with the exact transcript of personas/english_woman.wav."
+    },
+    {
+      "name": "indian_man",
+      "wav_path": "personas/indian_man.wav",
+      "text": "Replace this with the exact transcript of personas/indian_man.wav."
+    }
+  ]
+}
+```
+
+See `personas.example.json` (committed, placeholder paths/text only — no audio ships with this
+repo) for the canonical shape. Fields, all required per entry:
+
+- `name` — must match `^[A-Za-z0-9_-]{1,64}$`; unique within the manifest. This whitelist is what
+  makes `name` safe to interpolate directly into the output filename (see below) — no path
+  traversal or separator character can reach it.
+- `wav_path` — the reference clip to clone the voice from. **Resolved relative to the manifest
+  file's own directory, not the current working directory** — a manifest at
+  `/some/where/personas.json` with `"wav_path": "personas/foo.wav"` always resolves to
+  `/some/where/personas/foo.wav`, regardless of where you run the command from.
+- `text` — the exact transcript of `wav_path`. Required (unlike `generate_sample.py`'s optional
+  prompt text) because the manifest is the only source of a per-persona transcript; the backend
+  needs it for every zero-shot call.
+
+### Running it
+
+```bash
+make generate-personas MANIFEST=personas.json TEXT="turn off the kitchen lights"
+```
+
+or directly:
+
+```bash
+uv run python -m me2_voicegen.generate_personas \
+  --manifest personas.json \
+  --text "turn off the kitchen lights" \
+  --backend cosyvoice2 \
+  --out-dir out/ \
+  --device auto \
+  --opt fp16=true
+```
+
+`--manifest` is required; `--text` falls through to the same default carrier sentence as
+`generate_sample.py` if omitted; `--backend`/`--out-dir`/`--device`/`--opt`/`-v` all mirror
+`generate_sample.py`'s flags and semantics exactly (see "The `--backend`/`--opt` CLI shape" above).
+
+Output files are named `sample_<persona-name>_<timestamp>.wav`, written to `ME2/out/` (or
+`--out-dir`). All personas in one run share a **single** timestamp (captured once, after the
+backend is constructed, before the per-persona loop starts) — this is what makes it possible to
+tell which wavs belong to the same batch run.
+
+Sample output (two-persona manifest):
+
+```
+[english_woman] output path: ME2/out/sample_english_woman_1789259028225.wav
+[english_woman] duration: 4.160s
+[english_woman] sample rate: 24000
+[english_woman] wall-clock synthesis time: 6.745s
+[english_woman] RTF: 1.621
+[indian_man] output path: ME2/out/sample_indian_man_1789259028225.wav
+[indian_man] duration: 4.032s
+[indian_man] sample rate: 24000
+[indian_man] wall-clock synthesis time: 6.201s
+[indian_man] RTF: 1.538
+--- summary ---
+[english_woman] ok
+[indian_man] ok
+total wall-clock time: 12.946s
+peak GPU memory: 2779971584 bytes
+```
+
+### Partial-failure and exit-code semantics
+
+A single persona's synthesis failure does **not** abort the batch: the remaining personas still
+render, and a per-persona `ok`/`failed` summary line is printed for every persona regardless of
+outcome. The process exits `1` if *any* persona failed, `0` only if all succeeded — so a batch run
+is safe to script (check the exit code) without having to parse the summary text.
+
+### Fail-fast before model load
+
+The manifest is fully parsed and validated — `name`/`wav_path`/`text` present, `name` unique and
+matching the whitelist regex, and every `wav_path` resolving to an existing file — **before the
+backend is constructed at all**. An invalid manifest (missing field, duplicate name, bad name
+pattern, or a nonexistent reference wav) exits `1` immediately, naming the offending entry, with
+**zero** synthesizer construction and no multi-GB model load — you don't wait through a weights
+load only to find out entry 2 of 5 has a typo.
+
+### Timbre is entirely a function of the reference clip
+
+Distinct personas require genuinely distinct reference clips. CosyVoice2 derives the speaker
+embedding/timbre from the reference wav (`wav_path`) itself, via zero-shot voice cloning — there is
+no instruction-text or accent-text mechanism anywhere in this codebase (no `inference_instruct2`
+wiring; see Non-Goals) that changes speaker identity on a single shared base clip. Pointing two
+manifest entries at the same `wav_path` produces two identically-timbred outputs under different
+names — that's expected mechanical behavior (used deliberately in this project's own tests and
+manual verification runs, where only one real reference wav exists), not a bug. If you want two
+persons to actually sound different, you need two actually-different reference recordings.
+
+### Reference-clip consent/licensing, and keeping real manifests out of git
+
+Cloning a voice from a reference clip has real consent/licensing implications — only use reference
+clips you have the rights to use for this purpose. This repo does not commit any audio anywhere,
+and `personas.example.json` is a placeholder manifest only (fake paths, placeholder transcript
+text) — it exists purely to document the manifest shape above, not to be run as-is. If you build a
+real manifest with real persona clips, keep both the manifest (conventionally `ME2/personas.json`,
+the Makefile's default `MANIFEST` value) and the audio directory (conventionally `ME2/personas/`)
+out of version control the same way `out/`, `vendor/`, and `models/` already are — treat them as
+local, untracked artifacts, not repo content.
+
 ## Trimmed dependencies
 
 `pyproject.toml`'s dependency list is **not** a copy of upstream CosyVoice's
@@ -217,20 +351,29 @@ uv run pytest -m slow         # the one real end-to-end test: real GPU, real wei
 ```
 
 `make test` runs `uv run pytest` with `addopts = "-m 'not slow'"`, so the default run excludes
-the slow test automatically. As of the last full run: 57 fast tests pass (1 deselected). The
+the slow tests automatically. As of the last full run: **78 passed, 2 deselected**. The
 fast suite is guaranteed not to touch the vendor clone, model weights, or a GPU —
 `test_smoke_fast_suite.py` asserts the real `cosyvoice` package never lands in `sys.modules` as a
-side effect of importing the CLI or calling `list_backends()`/`get_backend_class()`, and that
-`--help` exits 0 without it either (this was originally verified manually by renaming `vendor/`
-away; that test makes the same guarantee an automatic regression check).
+side effect of importing either CLI (`generate_sample` or `generate_personas`) or calling
+`list_backends()`/`get_backend_class()`, and that `--help` exits 0 without it either for either
+CLI (this was originally verified manually by renaming `vendor/` away; that test makes the same
+guarantee an automatic regression check).
 
-`uv run pytest -m slow` runs the one `@pytest.mark.slow` test
-(`tests/test_end_to_end_slow.py`), which drives the real factory → real `AutoModel` →
+`uv run pytest -m slow -q` runs the two `@pytest.mark.slow` tests: **2 passed in ~55s** on the
+A100. `tests/test_end_to_end_slow.py` drives the real factory → real `AutoModel` →
 `inference_zero_shot` → `save_wav` against the real downloaded weights and the real GPU, and
 asserts the output is a valid, non-silent 24kHz wav. No mocks of CosyVoice internals, `AutoModel`,
 or ONNX Runtime anywhere in this test — if the real thing can't run, that's meant to surface as a
 real failure, not be papered over. It skips (doesn't fail) with a clear message if
-`ME2/models/CosyVoice2-0.5B/` isn't present/complete. Last real run: 1 passed in ~55s on the A100.
+`ME2/models/CosyVoice2-0.5B/` isn't present/complete. The second slow test,
+`tests/test_personas_end_to_end_slow.py`, is the persona-batch end-to-end GPU test: it builds a
+2-entry manifest in a temp dir from the vendored `zero_shot_prompt.wav` asset, constructs the real
+backend exactly once, and asserts two distinctly-named, non-silent 24kHz wavs from that single
+model load. It shares the same skip-when-weights-absent pattern as the first slow test (also
+skipping if the vendored asset itself is missing). Because both entries in that manifest point at
+the same vendored reference wav under two different persona names, the two outputs are expected to
+share identical timbre in this specific test — that's the mechanical single-clip case described
+above, not a check of distinct-voice cloning, which requires real, distinct, user-supplied clips.
 
 ## Cleaning up
 

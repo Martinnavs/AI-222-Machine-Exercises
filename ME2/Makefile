@@ -8,8 +8,9 @@ COSYVOICE_SHA := 074ca6dc9e80a2f424f1f74b48bdd7d3fea531cc
 
 BACKEND ?= cosyvoice2
 TEXT ?=
+MANIFEST ?= personas.json
 
-.PHONY: sync vendor download-model generate test clean
+.PHONY: sync vendor download-model generate generate-personas test clean
 
 sync:
 	$(UV) sync
@@ -29,6 +30,9 @@ download-model:
 
 generate:
 	$(UV) run python -m me2_voicegen.generate_sample --backend $(BACKEND) --text "$(TEXT)"
+
+generate-personas:
+	$(UV) run python -m me2_voicegen.generate_personas --manifest "$(MANIFEST)" --backend $(BACKEND) --text "$(TEXT)"
 
 test:
 	$(UV) run pytest

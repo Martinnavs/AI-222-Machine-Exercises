@@ -74,7 +74,9 @@ This is the ME2 analogue of the reference `simple-audio-transcriber` repo's own
    automatically (`list_backends()` reads `_BACKENDS` live and is what builds `argparse`'s
    `choices=`), and nothing else in the CLI needs touching. This is a flat eager dict, not a
    plugin/entry-point system — keep it that way unless a real need for dynamic registration shows
-   up.
+   up. Registering here also gets your backend `generate_personas.py`'s batch-over-personas CLI for
+   free — it dispatches through the same factory and `cli_common` helpers as `generate_sample.py`,
+   so there's no separate wiring step for the persona-batch path.
 
 3. **Common CLI flags → constructor kwargs.** `generate_sample.py` builds a config dict from the
    flags below using these exact constructor parameter names, and (via `inspect.signature`) only
