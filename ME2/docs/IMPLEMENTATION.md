@@ -36,10 +36,10 @@ pipeline itself.
   different axis from the phrase-list batching above (personas vary, not text) and does not
   contradict it.
 
-See `docs/raw_requirements/sources.md`, `docs/raw_requirements/potential_model_approach.md`,
-`docs/raw_requirements/voice_generation_approach.md`, and
-`docs/raw_requirements/streaming_approach.md` for the original planning context (read-only — not
-updated by this spike).
+See `drafts/sources.md`, `drafts/potential_model_approach.md`,
+`drafts/voice_generation_approach.md`, and `drafts/streaming_approach.md` for the original
+planning context (read-only — not updated by this spike). `drafts/` is untracked (local-only,
+not committed to the repo).
 
 ## Prerequisites
 
