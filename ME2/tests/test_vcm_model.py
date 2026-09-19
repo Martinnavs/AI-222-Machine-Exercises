@@ -27,6 +27,15 @@ def test_spec_scale_preset_instantiates_and_reports_size():
     assert n_bytes > n_params
 
 
+def test_optionc_preset_instantiates_under_1m_and_bigger_than_default():
+    model = build_model("optionc")
+    n_params = param_count(model)
+    assert 400_000 <= n_params < 1_000_000, n_params
+    assert n_params > param_count(MatchboxNetCTC(DEFAULT_CONFIG))
+    n_bytes = estimated_int8_bytes(model)
+    assert n_bytes > n_params
+
+
 def test_unknown_preset_raises():
     import pytest
 

@@ -2,7 +2,7 @@
 dynamic time axis, and quantize it to static INT8.
 
 Per docs/VCM-CONTRACT.md section 5, this module's dummy/calibration inputs
-are always `(B, 40, T)` log-mel features built from `vcm.features` -- the
+are always `(B, 40, T)` log-mel features built from `common.features` -- the
 same front-end training/eval use -- so no train/infer skew is introduced
 here.
 
@@ -23,7 +23,7 @@ import numpy as np
 import torch
 
 from me2_voicegen.vcm.dataset import VCMDataset
-from me2_voicegen.vcm.features import SAMPLE_RATE, LogMelFeatureExtractor
+from me2_voicegen.common.features import SAMPLE_RATE, LogMelFeatureExtractor
 from me2_voicegen.vcm.model import MatchboxNetConfig, MatchboxNetCTC
 
 WINDOW_SECONDS = 1.5
@@ -44,7 +44,7 @@ def load_checkpoint(checkpoint_path: str | Path) -> tuple[MatchboxNetCTC, dict]:
 
 
 def window_n_frames(window_samples: int = WINDOW_SAMPLES) -> int:
-    """Number of log-mel frames `vcm.features` produces for a
+    """Number of log-mel frames `common.features` produces for a
     `window_samples`-sample waveform (151 for the default 1.5s/24000-sample
     window at the real 16kHz/480/160 front-end parameters)."""
     extractor = LogMelFeatureExtractor()
@@ -172,7 +172,7 @@ def onnx_vs_pytorch_logits(model: MatchboxNetCTC, onnx_path: str | Path, n_frame
 
 def build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--checkpoint", type=Path, default=Path("out/vcm/checkpoint.pt"))
+    parser.add_argument("--checkpoint", type=Path, default=Path("out/vcm/checkpoints/checkpoint.pt"))
     parser.add_argument("--out-dir", type=Path, default=Path("out/vcm"))
     parser.add_argument("--manifest", type=Path, default=DEFAULT_MANIFEST)
     parser.add_argument("--calibration-samples", type=int, default=32)
@@ -187,18 +187,20 @@ def build_arg_parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None) -> None:
     args = build_arg_parser().parse_args(argv)
     args.out_dir.mkdir(parents=True, exist_ok=True)
+    export_dir = args.out_dir / "export"
+    export_dir.mkdir(parents=True, exist_ok=True)
 
     model, ckpt = load_checkpoint(args.checkpoint)
     n_frames = window_n_frames()
 
-    fp32_path = args.out_dir / "vcm_model.fp32.onnx"
+    fp32_path = export_dir / "vcm_model.fp32.onnx"
     export_fp32(model, fp32_path, n_frames=n_frames)
     print(f"exported fp32 ONNX -> {fp32_path} ({fp32_path.stat().st_size:,} bytes)")
 
     if args.skip_quantization:
         return
 
-    int8_path = args.out_dir / "vcm_model.int8.onnx"
+    int8_path = export_dir / "vcm_model.int8.onnx"
     reader = ValSplitCalibrationReader(
         manifest_path=args.manifest, n_samples=args.calibration_samples
     )

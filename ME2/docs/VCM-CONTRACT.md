@@ -46,7 +46,7 @@ contains blanks or repeats to collapse).
 Output of `normalize_text` is always encodable by `vcm.alphabet.encode`
 unchanged.
 
-## 3. Canonical intent phrases (`INTENT_PHRASES`, in `vcm/text.py`)
+## 3. Canonical intent phrases (`INTENT_PHRASES`, in `vcm/optiona/phrases.py`)
 
 20 entries, `<INTENT label>` (as it appears in the `target_commands` bucket
 of `test_set/manifest.csv`'s `label` column) -> canonical normalized phrase:
@@ -92,15 +92,41 @@ sources with real manifests, this session, over the full 2246-row
 
 | `source_dataset` | rule |
 |---|---|
-| `sanitized_clean` (1460 rows) | No manifest exists for this source. `INTENT_PHRASES[label]`. |
+| `sanitized_clean` (1460 rows) | No manifest exists for this source. `vcm.optiona.phrases.INTENT_PHRASES[label]`. |
 | `common_voice_negative` (187 rows) | Has a `transcript` column (per-chunk Whisper transcript). Use `transcript`, **not** `sentence` (that's the whole-clip prompt text, unreliable per-chunk). 10 of 187 rows have an empty transcript — resolves to `""`, not `None`. |
 | `youtube_institutional` (218 rows) | Has a `transcript` column. 34 of 218 rows are blank — correctly, these are `ambient`-bucket non-speech rows; resolves to `""`, not `None`. |
 | `background_noise` (194 rows) | No transcript column, no speech present. Always resolves to `""`. |
 | `filipino_speech_corpus` (187 rows) | Has a `sentence` column, but per decision (B): **all** 187 rows resolve to `None` unconditionally, regardless of whether the row is a whole-clip or `_cNN.wav` chunked row. Excluded from CTC loss entirely; stays in the eval set only as a rejection/false-accept probe. |
+| `optionb` (loaded from its own `out/conversions/v2/optionb/manifest.csv`, not `test_set/manifest.csv`) | Has its own `transcript` column already, read **directly off the row passed in — no source-manifest join** (unlike `common_voice_negative`/`youtube_institutional`), then passed through `vcm.optionb.transcript.prepare_ctc_transcript` before returning. `bucket` is one of `target_commands` (93 distinct real command transcripts, `label` = the intent, e.g. `ALARM`/`BRIGHTNESS`/...), `babble` (`label` = `unknown`, `transcript` = `""`), or `silence` (`label` = `silence`, `transcript` = `""`) — all three resolve via the same branch and all resolve to a string, never `None`. |
 
 Callers must distinguish `""` (real empty transcript / silence — include in
 CTC loss as an empty-target sequence) from `None` (excluded from CTC loss
 entirely) — they are not interchangeable.
+
+### `optionb` digit handling and where it lives relative to `vcm`
+
+`normalize_text` (section 2) drops digits entirely — they are outside the
+29-token CTC alphabet. Option B's real transcripts carry digit-bearing slot
+values (`"Alarm 6 AM"`, `"Brightness 100 percent"`), so feeding them through
+`normalize_text` unchanged would silently corrupt the target (`"alarm am"`,
+`"brightness percent"`). `vcm.optionb.transcript.prepare_ctc_transcript`
+spells digit runs out as words first (via `vcm.optionb.numbers.spell_integer`,
+which raises `ValueError` above 100 rather than silently mis-spelling), so no
+numeric content is lost by the time `normalize_text` runs.
+
+`vcm.optiona` and `vcm.optionb` are sub-packages of `vcm` (the per-dataset-
+experiment content for the toy/original dataset and the AI231 MEX2 Option B
+dataset respectively, per docs/OPTIONB-GRAMMAR-CONTRACT.md) — `vcm.text` ->
+`vcm.optionb.transcript` -> `vcm.optionb.numbers` is therefore an ordinary
+parent-package-imports-its-own-child relationship, not a cross-package
+dependency edge. The invariant that matters is the reverse: neither
+`vcm.optiona` nor `vcm.optionb` may import from `vcm`'s own generic CTC
+machinery (`vcm.train`, `vcm.evaluate`, `vcm.model`, `vcm.dataset`, etc.) or
+from each other — each experiment package only ever imports from
+`common.grammar_core` (dataset/methodology-agnostic) and its own sibling
+modules. Duplicating `spell_integer` inside `vcm.text` instead would give two
+number-spelling implementations that can drift, so this one-directional
+dependency (registry -> its own experiment children) is intentional.
 
 ## 5. Log-mel feature contract (Task 02 implements this; not yet built)
 
@@ -130,7 +156,51 @@ target + target_lengths).
   decoder's own score, `no_match` is `True` when nothing in the grammar
   accepted the decode (`intent` is then `None`).
 
-## 8. License provenance (CC-BY-NC-SA-4.0)
+## 8. Grammar selection in `vcm.evaluate` (source of truth: `vcm/evaluate.py`'s `GRAMMAR_REGISTRY`/`--grammar`)
+
+`evaluate.py --grammar` picks which grammar(s) each manifest's rows are
+decoded against, from `{spec, toy, optionb}`:
+
+| key | grammar | label set used in the per-intent table |
+|---|---|---|
+| `spec` | `vcm.optiona.grammar.SPEC_GRAMMAR` | `vcm.optiona.phrases.INTENT_PHRASES` (all 20, including the 12 SPEC_GRAMMAR has no accepting rule for at all -- see §7's coverage note; unchanged from before this flag existed) |
+| `toy` | `vcm.optiona.grammar.TOY_GRAMMAR` | `INTENT_PHRASES` (same as `spec`) |
+| `optionb` | `vcm.optionb.grammar.OPTIONB_GRAMMAR` | derived from the grammar itself (`{intent for _, intent, _ in OPTIONB_GRAMMAR.all_phrases()}`, 19 labels) -- **not** `INTENT_PHRASES`, whose label vocabulary is disjoint from Option B's (e.g. `BRIGHTNESS`/`COLOR`/`CREATE_REMINDER`/`TEMPERATURE` vs. `DIM_UP`/`DIM_DOWN`/`SET_REMINDER`/`TEMP_UP`/`TEMP_DOWN`) |
+
+Default is `spec,toy` -- this reproduces the original hardcoded
+`[(SPEC_GRAMMAR, "SPEC_GRAMMAR"), (TOY_GRAMMAR, "TOY_GRAMMAR")]` behavior
+bit-for-bit; passing `--grammar` at all is opt-in.
+
+**Degenerate-sweep hazard (D5/D11, `.scratch/optionb-dataset/tickets/
+04-pipeline-wiring.md`).** `sweep_thresholds`'s false-accept-rate side is
+computed over `REJECT_PROBE_BUCKETS = ("babble", "silence")` rows in
+*whatever manifest was passed via `--manifest`* -- it is not aware of which
+grammar was chosen. `--grammar optionb` only produces a meaningful,
+non-degenerate sweep against a manifest that itself carries `babble`/
+`silence` reject-probe rows alongside its Option B `target_commands` rows,
+which is exactly why `out/conversions/v2/optionb/manifest.csv` embeds the
+existing 786 `test_set/` probe rows by reference (D6c, §4's `optionb` row
+above) rather than shipping Option-B-only. Running `--grammar optionb`
+against a manifest with zero `babble`/`silence` rows makes `reject_idxs`
+empty, `false_accept_rate` identically `0.0` at every threshold, and
+`choose_operating_threshold` picks purely on `target_accept_rate` -- an
+apparently-clean sweep table that is actually uninformative, not a sign the
+model has no false accepts. Likewise, running `--grammar spec` or `--grammar
+toy` against `out/conversions/v2/optionb/manifest.csv` is not meaningful in
+the other direction: Option B's `label` values are never equal to a VCM
+`INTENT_PHRASES` key, so `n_exact_correct`/`exact_accuracy` would be ~0 by
+construction, the same D11 problem this flag exists to fix, just triggered
+by picking the wrong grammar for the manifest instead of having no choice
+at all.
+
+`Makefile`'s `optionb-train`/`optionb-eval` targets exist so the correct
+manifest+grammar pairing (`OPTIONB_MANIFEST` = `out/conversions/v2/optionb/
+manifest.csv`, `--grammar optionb`) is one command rather than a
+`VCM_MANIFEST=...` override a caller could accidentally pair with the wrong
+`--grammar` (or the default `spec,toy`, silently reproducing the exact D11
+failure mode above).
+
+## 9. License provenance (CC-BY-NC-SA-4.0)
 
 `out/conversions/v2/background_noise/` is sourced from ESC-50 and is
 licensed CC-BY-NC-SA-4.0 (non-commercial, share-alike). It feeds the

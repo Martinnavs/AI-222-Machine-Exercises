@@ -7,7 +7,7 @@ import pytest
 import torch
 import torchaudio
 
-import me2_voicegen.cosyvoice_env as cosyvoice_env
+import me2_voicegen.generation.cosyvoice_env as cosyvoice_env
 import me2_voicegen.vcm.text as vcm_text
 
 
@@ -98,8 +98,10 @@ def vcm_fake_manifest_factory(tmp_path, monkeypatch, vcm_wav_factory):
       - `duration_s` (float, default 0.5)
       - `transcript` (str, default "") -- used as the fake source
         manifest's `transcript` column for `common_voice_negative`/
-        `youtube_institutional` rows; ignored for other sources (their
-        resolution doesn't consult it -- see docs/VCM-CONTRACT.md section 4).
+        `youtube_institutional` rows; written directly into the built
+        manifest's own `transcript` column (no source manifest, no join)
+        for `optionb` rows -- see docs/VCM-CONTRACT.md section 4; ignored
+        for other sources.
       - `sentence` (str, default "") -- written to the fake
         `filipino_speech_corpus` source manifest's `sentence` column, for
         completeness only (resolve_transcript ignores it unconditionally).
@@ -156,6 +158,10 @@ def vcm_fake_manifest_factory(tmp_path, monkeypatch, vcm_wav_factory):
                     "source_relpath": source_relpath,
                     "group_id": str(i),
                     "split": spec.get("split", "train"),
+                    # Only `optionb` reads this directly off the built
+                    # manifest row (no source-manifest join, D7); harmless
+                    # unused column for the other four source_datasets.
+                    "transcript": spec.get("transcript", "") if source_dataset == "optionb" else "",
                 }
             )
 

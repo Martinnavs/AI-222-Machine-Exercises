@@ -26,7 +26,7 @@ def test_cosyvoice_vendor_package_never_imported_by_fast_surface() -> None:
         "suite - criterion 7 requires the fast suite to run with no vendor clone"
     )
 
-    from me2_voicegen import generate_sample
+    from me2_voicegen.generation import generate_sample
     from me2_voicegen.synthesis import factory
 
     factory.list_backends()
@@ -36,7 +36,7 @@ def test_cosyvoice_vendor_package_never_imported_by_fast_surface() -> None:
 
 
 def test_generate_sample_help_exits_cleanly_without_vendor_or_gpu() -> None:
-    from me2_voicegen import generate_sample
+    from me2_voicegen.generation import generate_sample
 
     with pytest.raises(SystemExit) as exc_info:
         generate_sample.parse_args(["--help"])
@@ -50,7 +50,7 @@ def test_generate_personas_help_exits_cleanly_without_vendor_or_gpu() -> None:
     the new persona-batch CLI (Ticket 01 of persona-batch-generation) - nothing
     stops a later change from reintroducing a module-level vendor import here
     either."""
-    from me2_voicegen import generate_personas
+    from me2_voicegen.generation import generate_personas
 
     with pytest.raises(SystemExit) as exc_info:
         generate_personas.parse_args(["--help"])
@@ -73,7 +73,7 @@ def test_cosyvoice2_backend_module_import_alone_does_not_touch_vendor() -> None:
 # adding this whole feature never drags GPU/TTS-vendor weight requirements
 # into the fast suite by accident. `vcm.slot_eval_set` is the one module in
 # this subpackage that *does* import from `me2_voicegen.synthesis`/
-# `me2_voicegen.personas` (it reuses the existing TTS pipeline per ticket
+# `me2_voicegen.generation.personas` (it reuses the existing TTS pipeline per ticket
 # 07) - that's exactly the case this guard exists to catch if it ever stops
 # being import-time-lazy.
 # ---------------------------------------------------------------------------
@@ -81,10 +81,10 @@ def test_cosyvoice2_backend_module_import_alone_does_not_touch_vendor() -> None:
 _VCM_MODULES = [
     "me2_voicegen.vcm.alphabet",
     "me2_voicegen.vcm.text",
-    "me2_voicegen.vcm.features",
-    "me2_voicegen.vcm.augment",
+    "me2_voicegen.common.features",
+    "me2_voicegen.common.augment",
     "me2_voicegen.vcm.dataset",
-    "me2_voicegen.vcm.grammar",
+    "me2_voicegen.vcm.optiona.grammar",
     "me2_voicegen.vcm.decoder",
     "me2_voicegen.vcm.model",
     "me2_voicegen.vcm.train",
@@ -99,10 +99,10 @@ _VCM_MODULES = [
 # with no reason to ever import the vendor package, but nothing stops a
 # later change from adding one - same regression guard as _VCM_MODULES.
 _OPTIONB_MODULES = [
-    "me2_voicegen.grammar_core",
-    "me2_voicegen.optionb.text",
-    "me2_voicegen.optionb.numbers",
-    "me2_voicegen.optionb.grammar",
+    "me2_voicegen.common.grammar_core",
+    "me2_voicegen.vcm.optionb.text",
+    "me2_voicegen.vcm.optionb.numbers",
+    "me2_voicegen.vcm.optionb.grammar",
 ]
 
 

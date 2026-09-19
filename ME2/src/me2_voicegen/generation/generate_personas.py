@@ -16,9 +16,9 @@ from pathlib import Path
 
 import torch
 
-from me2_voicegen.cli_common import DEFAULT_BACKEND, DEFAULT_TEXT, build_config
-from me2_voicegen.cosyvoice_env import OUT_DIR
-from me2_voicegen.personas import load_personas
+from me2_voicegen.generation.cli_common import DEFAULT_BACKEND, DEFAULT_TEXT, build_config
+from me2_voicegen.generation.cosyvoice_env import OUT_DIR
+from me2_voicegen.generation.personas import load_personas
 from me2_voicegen.synthesis.base import save_wav
 from me2_voicegen.synthesis.factory import create_synthesizer, get_backend_class, list_backends
 

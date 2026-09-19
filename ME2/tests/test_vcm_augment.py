@@ -11,13 +11,13 @@ import math
 
 import torch
 
-from me2_voicegen.vcm.augment import (
+from me2_voicegen.common.augment import (
     Augmenter,
     apply_noise,
     apply_rir,
     build_rir_pool,
 )
-from me2_voicegen.vcm.features import LogMelFeatureExtractor
+from me2_voicegen.common.features import LogMelFeatureExtractor
 
 
 def _sine(duration_s: float = 1.0, sample_rate: int = 16000, freq_hz: float = 440.0) -> torch.Tensor:

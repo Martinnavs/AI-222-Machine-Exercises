@@ -13,8 +13,8 @@ import pytest
 
 from me2_voicegen.vcm import alphabet as vcm_alphabet
 from me2_voicegen.vcm import decoder as dec
-from me2_voicegen.vcm import grammar as g
-from me2_voicegen.vcm.text import INTENT_PHRASES
+from me2_voicegen.vcm.optiona import grammar as g
+from me2_voicegen.vcm.optiona.phrases import INTENT_PHRASES
 
 PEAK = 20.0
 

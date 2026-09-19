@@ -110,7 +110,7 @@ def benchmark_session(session, n_frames: int, n_warmup: int = 10, n_iters: int =
 
 def build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--checkpoint", type=Path, default=Path("out/vcm/checkpoint.pt"))
+    parser.add_argument("--checkpoint", type=Path, default=Path("out/vcm/checkpoints/checkpoint.pt"))
     parser.add_argument("--out-dir", type=Path, default=Path("out/vcm"))
     parser.add_argument("--manifest", type=Path, default=DEFAULT_MANIFEST)
     parser.add_argument("--calibration-samples", type=int, default=32)
@@ -131,11 +131,15 @@ def build_arg_parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None) -> None:
     args = build_arg_parser().parse_args(argv)
     args.out_dir.mkdir(parents=True, exist_ok=True)
+    export_dir = args.out_dir / "export"
+    metadata_dir = args.out_dir / "metadata"
+    export_dir.mkdir(parents=True, exist_ok=True)
+    metadata_dir.mkdir(parents=True, exist_ok=True)
 
     model, ckpt = load_checkpoint(args.checkpoint)
     n_frames = window_n_frames()
 
-    fp32_path = args.out_dir / "vcm_model.fp32.onnx"
+    fp32_path = export_dir / "vcm_model.fp32.onnx"
     export_fp32(model, fp32_path, n_frames=n_frames)
     fp32_size_bytes = fp32_path.stat().st_size
 
@@ -172,7 +176,7 @@ def main(argv: list[str] | None = None) -> None:
             "estimated_size_mb": est_bytes / (1024 * 1024),
         }
     else:
-        int8_path = args.out_dir / "vcm_model.int8.onnx"
+        int8_path = export_dir / "vcm_model.int8.onnx"
         reader = ValSplitCalibrationReader(
             manifest_path=args.manifest, n_samples=args.calibration_samples
         )
@@ -189,11 +193,11 @@ def main(argv: list[str] | None = None) -> None:
             **int8_bench,
         }
 
-    json_path = args.out_dir / "vcm_benchmark.json"
+    json_path = metadata_dir / "vcm_benchmark.json"
     with json_path.open("w") as f:
         json.dump(result, f, indent=2)
 
-    md_path = args.out_dir / "vcm_benchmark.md"
+    md_path = metadata_dir / "vcm_benchmark.md"
     md_path.write_text(_render_markdown(result))
 
     print(f"wrote {json_path}")

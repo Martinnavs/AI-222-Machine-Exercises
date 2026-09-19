@@ -2,7 +2,7 @@ import sys
 
 import pytest
 
-import me2_voicegen.cosyvoice_env as cosyvoice_env
+import me2_voicegen.generation.cosyvoice_env as cosyvoice_env
 
 
 def test_path_resolution_is_anchored_relative_to_vendor_root(fake_project):

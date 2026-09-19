@@ -31,9 +31,37 @@ from me2_voicegen.vcm.evaluate import (
     render_markdown,
     sweep_thresholds,
 )
-from me2_voicegen.vcm.grammar import TOY_GRAMMAR
+from me2_voicegen.vcm.optiona.grammar import TOY_GRAMMAR
 
 CALL_IDS = alphabet.encode("call")
+
+
+# ---------------------------------------------------------------------------
+# --grammar selection (ticket 04, D11): GRAMMAR_REGISTRY / _intent_labels_for
+# and main()'s CLI wiring for spec/toy/optionb.
+# ---------------------------------------------------------------------------
+
+
+def test_intent_labels_for_spec_and_toy_use_intent_phrases():
+    from me2_voicegen.vcm.evaluate import _intent_labels_for
+    from me2_voicegen.vcm.optiona.phrases import INTENT_PHRASES
+
+    assert _intent_labels_for("spec") == sorted(INTENT_PHRASES)
+    assert _intent_labels_for("toy") == sorted(INTENT_PHRASES)
+
+
+def test_intent_labels_for_optionb_uses_optionb_grammars_own_intents():
+    from me2_voicegen.vcm.optionb.grammar import OPTIONB_GRAMMAR
+    from me2_voicegen.vcm.evaluate import _intent_labels_for
+    from me2_voicegen.vcm.optiona.phrases import INTENT_PHRASES
+
+    labels = _intent_labels_for("optionb")
+    assert labels == sorted({intent for _, intent, _ in OPTIONB_GRAMMAR.all_phrases()})
+    # Option B's label vocabulary is disjoint from vcm's -- this must not
+    # silently fall back to INTENT_PHRASES.
+    assert labels != sorted(INTENT_PHRASES)
+    assert "BRIGHTNESS" in labels
+    assert "DIM_UP" not in labels
 
 
 # ---------------------------------------------------------------------------
@@ -262,7 +290,7 @@ def test_evaluate_slot_eval_set_scores_accept_and_intent_correct(
     tmp_path, vcm_wav_factory, vcm_stub_model_factory
 ):
     from me2_voicegen.vcm.evaluate import evaluate_slot_eval_set
-    from me2_voicegen.vcm.features import LogMelFeatureExtractor
+    from me2_voicegen.common.features import LogMelFeatureExtractor
 
     manifest_path = _write_slot_eval_manifest(tmp_path, vcm_wav_factory)
     model = vcm_stub_model_factory(forced_ids=CALL_IDS)
@@ -347,11 +375,11 @@ def test_main_gracefully_skips_absent_slot_eval_manifest(
         ]
     )
 
-    report = json.loads((out_dir / "eval_report.json").read_text())
+    report = json.loads((out_dir / "metadata" / "eval_report.json").read_text())
     assert report["slot_eval_sections"] is None
     assert "not found" in report["slot_eval_skipped_reason"]
-    assert (out_dir / "eval_report.md").exists()
-    assert "Skipped:" in (out_dir / "eval_report.md").read_text()
+    assert (out_dir / "metadata" / "eval_report.md").exists()
+    assert "Skipped:" in (out_dir / "metadata" / "eval_report.md").read_text()
 
 
 def test_main_catches_and_continues_on_malformed_slot_eval_manifest(
@@ -376,7 +404,7 @@ def test_main_catches_and_continues_on_malformed_slot_eval_manifest(
         ]
     )
 
-    report = json.loads((out_dir / "eval_report.json").read_text())
+    report = json.loads((out_dir / "metadata" / "eval_report.json").read_text())
     assert report["slot_eval_sections"] is None
     assert "present but evaluation failed" in report["slot_eval_skipped_reason"]
 
@@ -403,9 +431,122 @@ def test_main_runs_slot_eval_section_when_manifest_present_and_valid(
         ]
     )
 
-    report = json.loads((out_dir / "eval_report.json").read_text())
+    report = json.loads((out_dir / "metadata" / "eval_report.json").read_text())
     assert report["slot_eval_skipped_reason"] is None
     assert report["slot_eval_sections"] is not None
     assert len(report["slot_eval_sections"]) == 2
     for section in report["slot_eval_sections"]:
         assert section["n_clips"] == 1
+
+
+def test_main_default_grammar_is_spec_toy(
+    tmp_path, monkeypatch, vcm_fake_manifest_factory, vcm_stub_model_factory
+):
+    manifest_path = _build_main_manifest(vcm_fake_manifest_factory)
+    _patch_load_checkpoint(monkeypatch, vcm_stub_model_factory)
+
+    out_dir = tmp_path / "eval_out"
+    main(
+        [
+            "--manifest",
+            str(manifest_path),
+            "--checkpoint",
+            "unused.pt",
+            "--out-dir",
+            str(out_dir),
+            "--slot-eval-manifest",
+            str(tmp_path / "does_not_exist" / "manifest.csv"),
+        ]
+    )
+
+    report = json.loads((out_dir / "metadata" / "eval_report.json").read_text())
+    labels = [s["grammar"] for s in report["grammar_sections"]]
+    assert labels == ["SPEC_GRAMMAR", "TOY_GRAMMAR"]
+
+
+def _build_optionb_main_manifest(vcm_fake_manifest_factory):
+    specs = []
+    for split in ("val", "test"):
+        specs.append(
+            {
+                "bucket": "target_commands",
+                "source_dataset": "optionb",
+                "label": "CALL",
+                "split": split,
+                "transcript": "Call",
+            }
+        )
+        specs.append(
+            {
+                "bucket": "babble",
+                "source_dataset": "common_voice_negative",
+                "label": "unknown",
+                "split": split,
+                "transcript": "some other speech",
+            }
+        )
+        specs.append(
+            {
+                "bucket": "silence",
+                "source_dataset": "background_noise",
+                "label": "unknown",
+                "split": split,
+            }
+        )
+    return vcm_fake_manifest_factory(specs)
+
+
+def test_main_grammar_optionb_selects_optionb_grammar_and_its_own_intent_labels(
+    tmp_path, monkeypatch, vcm_fake_manifest_factory, vcm_stub_model_factory
+):
+    manifest_path = _build_optionb_main_manifest(vcm_fake_manifest_factory)
+    _patch_load_checkpoint(monkeypatch, vcm_stub_model_factory)
+
+    out_dir = tmp_path / "eval_out"
+    main(
+        [
+            "--manifest",
+            str(manifest_path),
+            "--checkpoint",
+            "unused.pt",
+            "--out-dir",
+            str(out_dir),
+            "--slot-eval-manifest",
+            str(tmp_path / "does_not_exist" / "manifest.csv"),
+            "--grammar",
+            "optionb",
+        ]
+    )
+
+    report = json.loads((out_dir / "metadata" / "eval_report.json").read_text())
+    assert len(report["grammar_sections"]) == 1
+    section = report["grammar_sections"][0]
+    assert section["grammar"] == "OPTIONB_GRAMMAR"
+    assert "DIM_UP" not in section["intent_labels"]
+    assert "BRIGHTNESS" in section["intent_labels"]
+    # Non-degenerate sweep (D5/D11): babble+silence reject probes present.
+    ts = section["test_split"]
+    assert ts["n_target_commands"] == 1
+    assert ts["false_accept_rate_babble"]["n"] == 1
+    assert ts["false_accept_rate_silence"]["n"] == 1
+
+
+def test_main_rejects_unknown_grammar_key(
+    tmp_path, monkeypatch, vcm_fake_manifest_factory, vcm_stub_model_factory
+):
+    manifest_path = _build_main_manifest(vcm_fake_manifest_factory)
+    _patch_load_checkpoint(monkeypatch, vcm_stub_model_factory)
+
+    with pytest.raises(SystemExit):
+        main(
+            [
+                "--manifest",
+                str(manifest_path),
+                "--checkpoint",
+                "unused.pt",
+                "--out-dir",
+                str(tmp_path / "eval_out"),
+                "--grammar",
+                "bogus",
+            ]
+        )

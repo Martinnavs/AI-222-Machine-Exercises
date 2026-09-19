@@ -11,8 +11,8 @@ import torch
 
 from me2_voicegen.vcm import alphabet
 from me2_voicegen.vcm.decoder import decode
-from me2_voicegen.vcm.features import LogMelFeatureExtractor
-from me2_voicegen.vcm.grammar import SPEC_GRAMMAR, TOY_GRAMMAR
+from me2_voicegen.common.features import LogMelFeatureExtractor
+from me2_voicegen.vcm.optiona.grammar import SPEC_GRAMMAR, TOY_GRAMMAR
 from me2_voicegen.vcm.pipeline import (
     SlidingWindowPipeline,
     STRIDE_SAMPLES,
@@ -219,9 +219,9 @@ def test_load_checkpoint_real_artifact_if_present():
 
     from me2_voicegen.vcm.pipeline import load_checkpoint
 
-    ckpt_path = Path(__file__).resolve().parents[1] / "out" / "vcm" / "checkpoint.pt"
+    ckpt_path = Path(__file__).resolve().parents[1] / "out" / "vcm" / "checkpoints" / "checkpoint.pt"
     if not ckpt_path.exists():
-        pytest.skip("out/vcm/checkpoint.pt not present (Task 04 training artifact)")
+        pytest.skip("out/vcm/checkpoints/checkpoint.pt not present (Task 04 training artifact)")
 
     model, checkpoint = load_checkpoint(ckpt_path, device="cpu")
     assert model.training is False

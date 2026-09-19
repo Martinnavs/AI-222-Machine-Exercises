@@ -6,7 +6,7 @@ from __future__ import annotations
 
 import torch
 
-from me2_voicegen.vcm.augment import Augmenter
+from me2_voicegen.common.augment import Augmenter
 from me2_voicegen.vcm.dataset import VCMDataset, collate_fn
 
 

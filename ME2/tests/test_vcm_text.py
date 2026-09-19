@@ -20,6 +20,7 @@ import pytest
 
 import me2_voicegen.vcm.alphabet as alphabet
 import me2_voicegen.vcm.text as text
+from me2_voicegen.vcm.optiona.phrases import INTENT_PHRASES
 
 MANIFEST_PATH = text.PROJECT_ROOT / "out" / "conversions" / "v2" / "test_set" / "manifest.csv"
 REPORTS_DIR = text.PROJECT_ROOT / "out" / "conversions" / "v2" / "reports"
@@ -64,7 +65,7 @@ def test_alphabet_has_29_tokens():
     assert alphabet.BLANK_ID == 0
 
 
-@pytest.mark.parametrize("phrase", sorted(text.INTENT_PHRASES.values()))
+@pytest.mark.parametrize("phrase", sorted(INTENT_PHRASES.values()))
 def test_encode_decode_roundtrip_canonical_phrases(phrase):
     assert alphabet.decode(alphabet.encode(phrase)) == phrase
 
@@ -144,7 +145,7 @@ def _first_row_for_source(source_dataset: str) -> dict:
 def test_resolve_transcript_sanitized_clean():
     row = _first_row_for_source("sanitized_clean")
     result = text.resolve_transcript(row)
-    assert result == text.INTENT_PHRASES[row["label"]]
+    assert result == INTENT_PHRASES[row["label"]]
 
 
 def test_resolve_transcript_common_voice_negative():
@@ -205,7 +206,7 @@ _QA_ROW_RE = re.compile(r"^\|\s*([^|]+?)\s*\|\s*([^|]+?)\s*\|\s*([^|]+?)\s*\|\s*
 
 def _derive_intent_phrases_from_reports() -> dict[str, str]:
     derived: dict[str, str] = {}
-    for intent in text.INTENT_PHRASES:
+    for intent in INTENT_PHRASES:
         glob_intent = intent.replace("_", "-")
         matches = sorted(glob.glob(str(REPORTS_DIR / f"tmp-qa-{glob_intent}-*.md")))
         assert len(matches) == 1, f"expected exactly one QA report for {intent}, found {matches}"
@@ -238,4 +239,4 @@ def _derive_intent_phrases_from_reports() -> dict[str, str]:
 @pytest.mark.slow
 def test_intent_phrases_matches_real_qa_reports():
     derived = _derive_intent_phrases_from_reports()
-    assert derived == text.INTENT_PHRASES
+    assert derived == INTENT_PHRASES

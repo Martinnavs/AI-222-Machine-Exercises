@@ -4,7 +4,7 @@ See docs/OPTIONB-GRAMMAR-CONTRACT.md for the full contract (rules, slot
 vocabularies, normalization, canonical-93-vs-accepted-129 arithmetic). This
 module is that contract's source of truth for the rules themselves.
 
-Unlike `vcm.grammar`'s SPEC_GRAMMAR/TOY_GRAMMAR (which use the optional-
+Unlike `vcm.optiona.grammar`'s SPEC_GRAMMAR/TOY_GRAMMAR (which use the optional-
 component combinator to productively generate optional-word variants),
 Option B's dataset defines exactly 3 fixed phrasings/templates per intent --
 there is no optional-word structure to encode. Every rule below is a flat
@@ -15,7 +15,7 @@ phrases the dataset was never recorded with.
 
 from __future__ import annotations
 
-from ..grammar_core import Grammar, alt, compile_grammar, literal, seq, slot, with_intent, _vocab
+from me2_voicegen.common.grammar_core import Grammar, alt, compile_grammar, literal, seq, slot, with_intent, _vocab
 from .numbers import spell_integer
 
 
@@ -67,7 +67,10 @@ TASK: list[tuple[tuple[str, ...], str]] = _vocab("drink water", "study", "exerci
 # ---------------------------------------------------------------------------
 # $CMD_* rules -- one alt() of exactly 3 literal phrasings/templates each,
 # verbatim from docs/raw_requirements/optionb-dataset-readme.md's "Phrase
-# variations" table.
+# variations" table, with exactly one documented exception
+# (KNOWN_README_DIVERGENCES below): CMD_VOLUME_DOWN's v2 follows the vendored
+# manifest-transcript table (optionb-dataset-manifest-summary.md), not the
+# README, because the two disagree and the manifest is ground truth.
 # ---------------------------------------------------------------------------
 
 CMD_PLAY_MUSIC = with_intent(
@@ -80,9 +83,12 @@ CMD_VOLUME_UP = with_intent(
     alt(literal("volume", "up"), literal("increase", "the", "volume"), literal("turn", "the", "volume", "up")),
 )
 
+# v2 is "lower the volume", not the README's "decrease the volume" -- see
+# KNOWN_README_DIVERGENCES below; the real dataset's 196 recorded rows of
+# this phrase all say "lower", and "decrease" appears in zero rows.
 CMD_VOLUME_DOWN = with_intent(
     "VOLUME_DOWN",
-    alt(literal("volume", "down"), literal("decrease", "the", "volume"), literal("turn", "the", "volume", "down")),
+    alt(literal("volume", "down"), literal("lower", "the", "volume"), literal("turn", "the", "volume", "down")),
 )
 
 CMD_NEXT = with_intent(
@@ -188,6 +194,22 @@ CMD_LIST_REMINDERS = with_intent(
     "LIST_REMINDERS",
     alt(literal("reminders"), literal("show", "my", "reminders"), literal("list", "my", "reminders")),
 )
+
+
+# ---------------------------------------------------------------------------
+# Known divergences between the vendored README anchor and the vendored
+# manifest-transcript anchor (docs/raw_requirements/optionb-dataset-
+# manifest-summary.md). Each entry is (intent, readme_phrase, actual_phrase)
+# where actual_phrase is what OPTIONB_GRAMMAR implements -- the manifest's
+# version, since the manifest is ground truth. The drift guard
+# (tests/test_optionb_grammar.py) asserts against both anchors and uses this
+# table to reconcile the one known disagreement, rather than silently
+# overriding or hiding it.
+# ---------------------------------------------------------------------------
+
+KNOWN_README_DIVERGENCES: list[tuple[str, str, str]] = [
+    ("VOLUME_DOWN", "decrease the volume", "lower the volume"),
+]
 
 
 OPTIONB_RULES: dict[str, list[tuple[tuple[str, ...], dict, str]]] = {

@@ -12,7 +12,7 @@ feature front-end and the real TOY_GRAMMAR decoder, actually compose to
 the right answer on a real audio file from disk -- the thing an end user
 of this pipeline actually cares about.
 
-`@pytest.mark.slow`: requires `out/vcm/checkpoint.pt` (Task 04's real
+`@pytest.mark.slow`: requires `out/vcm/checkpoints/checkpoint.pt` (Task 04's real
 training artifact) and reads a real audio file from `out/conversions/v2/`;
 skipped, not failed, if the checkpoint is absent so the fast suite never
 depends on it.
@@ -26,7 +26,7 @@ import pytest
 import torchaudio
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
-CHECKPOINT_PATH = PROJECT_ROOT / "out" / "vcm" / "checkpoint.pt"
+CHECKPOINT_PATH = PROJECT_ROOT / "out" / "vcm" / "checkpoints" / "checkpoint.pt"
 MANIFEST_PATH = PROJECT_ROOT / "out" / "conversions" / "v2" / "test_set" / "manifest.csv"
 TEST_SET_DIR = PROJECT_ROOT / "out" / "conversions" / "v2" / "test_set"
 
@@ -50,8 +50,8 @@ def _skip_if_artifacts_missing() -> None:
 def test_real_checkpoint_real_clip_decodes_to_correct_intent_via_full_pipeline():
     _skip_if_artifacts_missing()
 
-    from me2_voicegen.vcm.features import LogMelFeatureExtractor
-    from me2_voicegen.vcm.grammar import TOY_GRAMMAR
+    from me2_voicegen.common.features import LogMelFeatureExtractor
+    from me2_voicegen.vcm.optiona.grammar import TOY_GRAMMAR
     from me2_voicegen.vcm.pipeline import infer_waveform, load_checkpoint
 
     model, checkpoint = load_checkpoint(CHECKPOINT_PATH, device="cpu")
@@ -85,8 +85,8 @@ def test_real_checkpoint_real_clip_rejected_under_wrong_grammar_coverage_gap():
     (Task 03's own test scope)."""
     _skip_if_artifacts_missing()
 
-    from me2_voicegen.vcm.features import LogMelFeatureExtractor
-    from me2_voicegen.vcm.grammar import SPEC_GRAMMAR
+    from me2_voicegen.common.features import LogMelFeatureExtractor
+    from me2_voicegen.vcm.optiona.grammar import SPEC_GRAMMAR
     from me2_voicegen.vcm.pipeline import infer_waveform, load_checkpoint
 
     model, _ = load_checkpoint(CHECKPOINT_PATH, device="cpu")

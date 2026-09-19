@@ -17,12 +17,12 @@ from pathlib import Path
 
 import torch
 
-from me2_voicegen.cli_common import DEFAULT_BACKEND, DEFAULT_TEXT
-from me2_voicegen.cli_common import build_config as _cli_build_config
-from me2_voicegen.cli_common import coerce_opt_value as _coerce_opt_value
-from me2_voicegen.cli_common import accepted_param_names as _accepted_param_names
-from me2_voicegen.cli_common import parse_opts as _parse_opts
-from me2_voicegen.cosyvoice_env import OUT_DIR
+from me2_voicegen.generation.cli_common import DEFAULT_BACKEND, DEFAULT_TEXT
+from me2_voicegen.generation.cli_common import build_config as _cli_build_config
+from me2_voicegen.generation.cli_common import coerce_opt_value as _coerce_opt_value
+from me2_voicegen.generation.cli_common import accepted_param_names as _accepted_param_names
+from me2_voicegen.generation.cli_common import parse_opts as _parse_opts
+from me2_voicegen.generation.cosyvoice_env import OUT_DIR
 from me2_voicegen.synthesis.base import VoicePrompt, save_wav
 from me2_voicegen.synthesis.factory import create_synthesizer, get_backend_class, list_backends
 

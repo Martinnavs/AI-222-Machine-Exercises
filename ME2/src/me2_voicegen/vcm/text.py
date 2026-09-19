@@ -1,5 +1,7 @@
-"""Text normalization, the canonical intent-phrase table, and transcript
-resolution across the five out/conversions/v2 test_set source datasets.
+"""Text normalization and transcript resolution across the five
+out/conversions/v2 test_set source datasets. Dispatches to each
+per-experiment package (`vcm.optiona`, `vcm.optionb`) for that experiment's
+own canonical phrase table/transcript prep.
 
 See docs/VCM-CONTRACT.md for the full transcript-resolution table this
 module implements; this file is its source of truth, not the other way
@@ -13,6 +15,9 @@ import string
 from functools import lru_cache
 from pathlib import Path
 from typing import Mapping
+
+from me2_voicegen.vcm.optiona.phrases import INTENT_PHRASES as _OPTIONA_INTENT_PHRASES
+from me2_voicegen.vcm.optionb.transcript import prepare_ctc_transcript
 
 # src/me2_voicegen/vcm/text.py -> parents[3] is the ME2 project root.
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
@@ -44,34 +49,6 @@ def normalize_text(text: str) -> str:
     return " ".join("".join(chars).split())
 
 
-# INTENT_PHRASES: <INTENT label> -> canonical normalized phrase.
-# Verified against out/conversions/v2/reports/tmp-qa-<INTENT>-*.md "expected"
-# column this session (see also the slow drift-guard test in
-# tests/test_vcm_text.py that re-derives this table from those reports).
-INTENT_PHRASES: dict[str, str] = {
-    "ALARM": "set alarm",  # tmp-qa-ALARM-*.md
-    "CALL": "call",  # tmp-qa-CALL-*.md
-    "DIM_DOWN": "dimmer",  # tmp-qa-DIM-DOWN-*.md
-    "DIM_UP": "brighter",  # tmp-qa-DIM-UP-*.md
-    "LIGHT_OFF": "lights off",  # tmp-qa-LIGHT-OFF-*.md
-    "LIGHT_ON": "lights on",  # tmp-qa-LIGHT-ON-*.md
-    "LIST_REMINDERS": "list reminders",  # tmp-qa-LIST-REMINDERS-*.md
-    "MESSAGE": "message",  # tmp-qa-MESSAGE-*.md
-    "NEXT": "next",  # tmp-qa-NEXT-*.md
-    "PAUSE": "pause",  # tmp-qa-PAUSE-*.md
-    "PLAY_MUSIC": "play music",  # tmp-qa-PLAY-MUSIC-*.md
-    "SET_REMINDER": "set reminder",  # tmp-qa-SET-REMINDER-*.md
-    "STOP": "stop",  # tmp-qa-STOP-*.md
-    "TEMP_DOWN": "cooler",  # tmp-qa-TEMP-DOWN-*.md
-    "TEMP_UP": "warmer",  # tmp-qa-TEMP-UP-*.md
-    "TIME": "time",  # tmp-qa-TIME-*.md
-    "TIMER": "set timer",  # tmp-qa-TIMER-*.md
-    "VOLUME_DOWN": "volume down",  # tmp-qa-VOLUME-DOWN-*.md
-    "VOLUME_UP": "volume up",  # tmp-qa-VOLUME-UP-*.md
-    "WEATHER": "weather",  # tmp-qa-WEATHER-*.md
-}
-
-
 @lru_cache(maxsize=None)
 def _load_source_manifest(source_dataset: str) -> Mapping[str, dict]:
     """Load out/conversions/v2/<source_dataset>/manifest.csv keyed by its
@@ -89,7 +66,8 @@ def resolve_transcript(manifest_row: Mapping[str, str]) -> str | None:
     dataset's manifest. See docs/VCM-CONTRACT.md for the full rules table;
     summary:
 
-    - sanitized_clean: no source manifest exists -> INTENT_PHRASES[label].
+    - sanitized_clean: no source manifest exists ->
+      vcm.optiona.phrases.INTENT_PHRASES[label].
     - common_voice_negative: source manifest `transcript` column (per-chunk
       Whisper transcript; may be "").
     - youtube_institutional: source manifest `transcript` column (blank for
@@ -98,17 +76,26 @@ def resolve_transcript(manifest_row: Mapping[str, str]) -> str | None:
     - filipino_speech_corpus: per decision (B), always None, regardless of
       whether the row is a whole-clip or `_cNN.wav` chunked row -- excluded
       from CTC loss uniformly, kept only as an eval rejection probe.
+    - optionb: own manifest's `transcript` column, read directly (no source
+      manifest join -- unlike common_voice_negative/youtube_institutional,
+      this row *is* the source row), passed through
+      `vcm.optionb.transcript.prepare_ctc_transcript` first so digit-bearing
+      slot values (e.g. "Alarm 6 AM") survive this module's own
+      `normalize_text` instead of being silently dropped.
     """
     source_dataset = manifest_row["source_dataset"]
 
     if source_dataset == "sanitized_clean":
-        return INTENT_PHRASES[manifest_row["label"]]
+        return _OPTIONA_INTENT_PHRASES[manifest_row["label"]]
 
     if source_dataset == "background_noise":
         return ""
 
     if source_dataset == "filipino_speech_corpus":
         return None
+
+    if source_dataset == "optionb":
+        return prepare_ctc_transcript(manifest_row["transcript"])
 
     if source_dataset in ("common_voice_negative", "youtube_institutional"):
         source_manifest = _load_source_manifest(source_dataset)

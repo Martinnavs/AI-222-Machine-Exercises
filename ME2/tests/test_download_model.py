@@ -1,7 +1,7 @@
 import pytest
 
-import me2_voicegen.cosyvoice_env as cosyvoice_env
-import me2_voicegen.download_model as download_model
+import me2_voicegen.generation.cosyvoice_env as cosyvoice_env
+import me2_voicegen.generation.download_model as download_model
 
 
 def make_complete_manifest(model_dir):

@@ -1,4 +1,4 @@
-"""Tests for me2_voicegen.optionb (see docs/OPTIONB-GRAMMAR-CONTRACT.md).
+"""Tests for me2_voicegen.vcm.optionb (see docs/OPTIONB-GRAMMAR-CONTRACT.md).
 
 CANONICAL_93 and WORD_NUMBERS are hardcoded independently of the production
 code under test: CANONICAL_93 is transcribed from the vendored README's
@@ -16,10 +16,16 @@ from pathlib import Path
 
 import pytest
 
-from me2_voicegen.optionb import OPTIONB_GRAMMAR, normalize_text, spell_integer
+from me2_voicegen.vcm.optionb import KNOWN_README_DIVERGENCES, OPTIONB_GRAMMAR, normalize_text, spell_integer
 
 README_PATH = (
     Path(__file__).resolve().parents[1] / "docs" / "raw_requirements" / "optionb-dataset-readme.md"
+)
+MANIFEST_SUMMARY_PATH = (
+    Path(__file__).resolve().parents[1]
+    / "docs"
+    / "raw_requirements"
+    / "optionb-dataset-manifest-summary.md"
 )
 
 # ---------------------------------------------------------------------------
@@ -34,7 +40,7 @@ CANONICAL_93: list[tuple[str, str, dict]] = [
     ("increase the volume", "VOLUME_UP", {}),
     ("turn the volume up", "VOLUME_UP", {}),
     ("volume down", "VOLUME_DOWN", {}),
-    ("decrease the volume", "VOLUME_DOWN", {}),
+    ("lower the volume", "VOLUME_DOWN", {}),
     ("turn the volume down", "VOLUME_DOWN", {}),
     ("skip song", "NEXT", {}),
     ("next song", "NEXT", {}),
@@ -314,6 +320,13 @@ def test_all_129_distinct_and_normalization_stable():
 # accepted-129 set has 8 strict-prefix pairs, not 5. This hardcodes the
 # actual verified set rather than forcing an assertion that does not match
 # the grammar's real (README-derived) behavior.
+#
+# Re-derived, not assumed, for this ticket's VOLUME_DOWN v2 phrasing change
+# ("decrease the volume" -> "lower the volume"): re-ran the strict-prefix
+# scan over the new accepted-129 set independently rather than carrying the
+# 8-pair set over unchanged (the exact staleness mistake flagged as a trap in
+# this ticket). "lower the volume" introduces no new prefix relationship
+# with any other accepted phrase, so the set is unchanged at 8 pairs.
 # ---------------------------------------------------------------------------
 
 EXPECTED_STRICT_PREFIX_PAIRS = {
@@ -383,7 +396,16 @@ def test_reject_word_form_over_generation_per_numeric_slot(phrase):
 
 
 # ---------------------------------------------------------------------------
-# Drift guard (D7/D8): re-derive the canonical 93 from the vendored README.
+# Drift guard (D7/D8/D1): dual anchors.
+#
+# Two independently vendored sources are re-derived and cross-checked against
+# the grammar: the README (`optionb-dataset-readme.md`, secondary anchor,
+# known-stale on exactly one phrase) and the real manifest-transcript summary
+# (`optionb-dataset-manifest-summary.md`, primary anchor -- ground truth,
+# since it is derived from the actual recorded audio's transcripts, not from
+# hand-maintained documentation). The two anchors disagree on exactly one
+# phrase (`KNOWN_README_DIVERGENCES`); that disagreement is asserted and
+# documented below, never silently tolerated or hidden.
 # ---------------------------------------------------------------------------
 
 _PLACEHOLDER_TO_SLOT = {
@@ -440,29 +462,78 @@ def _readme_phrase_to_words(phrase: str) -> list[str]:
     return phrase.split()
 
 
-def test_drift_guard_readme_matches_grammar():
-    readme_text = README_PATH.read_text(encoding="utf-8")
-    rows = _parse_readme_phrase_table(readme_text)
+def _derive_canonical_from_table(text: str) -> list[tuple[str, str, dict]]:
+    rows = _parse_readme_phrase_table(text)
     assert len(rows) == 19
-    slot_to_values = _parse_readme_slot_values_table(readme_text)
+    slot_to_values = _parse_readme_slot_values_table(text)
     assert len(slot_to_values) == 6
 
-    derived_canonical: list[tuple[str, str, dict]] = []
+    derived: list[tuple[str, str, dict]] = []
     for intent, v1, v2, v3 in rows:
         for template in (v1, v2, v3):
             placeholder_match = re.search(r"\{\w+\}", template)
             if placeholder_match is None:
-                text = normalize_text(" ".join(_readme_phrase_to_words(template)))
-                derived_canonical.append((text, intent, {}))
+                phrase = normalize_text(" ".join(_readme_phrase_to_words(template)))
+                derived.append((phrase, intent, {}))
                 continue
             placeholder = placeholder_match.group(0)
             slot_name = _PLACEHOLDER_TO_SLOT[placeholder]
             for value in slot_to_values[slot_name]:
                 filled = template.replace(placeholder, value)
-                text = normalize_text(" ".join(_readme_phrase_to_words(filled)))
-                derived_canonical.append((text, intent, {slot_name: value}))
+                phrase = normalize_text(" ".join(_readme_phrase_to_words(filled)))
+                derived.append((phrase, intent, {slot_name: value}))
+    assert len(derived) == 93
+    return derived
 
-    assert len(derived_canonical) == 93
+
+def test_known_readme_divergences_exactly_one_entry():
+    assert len(KNOWN_README_DIVERGENCES) == 1
+    assert KNOWN_README_DIVERGENCES == [("VOLUME_DOWN", "decrease the volume", "lower the volume")]
+
+
+def test_drift_guard_readme_matches_grammar():
+    """Secondary anchor. Re-derives the canonical 93 from the vendored
+    README and reconciles the one known divergence via
+    KNOWN_README_DIVERGENCES instead of silently overriding it: the raw
+    README phrase must be *rejected* by the grammar (proving the divergence
+    is real, not a stale assumption), and the substituted manifest-derived
+    phrase must be *accepted* in its place."""
+    readme_text = README_PATH.read_text(encoding="utf-8")
+    derived_canonical = _derive_canonical_from_table(readme_text)
+
+    divergence_by_readme_phrase = {
+        (intent, readme_phrase): actual_phrase
+        for intent, readme_phrase, actual_phrase in KNOWN_README_DIVERGENCES
+    }
+
+    reconciled: list[tuple[str, str, dict]] = []
+    for text, intent, slots in derived_canonical:
+        actual_phrase = divergence_by_readme_phrase.get((intent, text))
+        if actual_phrase is not None:
+            assert OPTIONB_GRAMMAR.accepts(text) is None
+            text = actual_phrase
+        reconciled.append((text, intent, slots))
+
+    assert {p for p, _, _ in reconciled} == {p for p, _, _ in CANONICAL_93}
+
+    for text, intent, slots in reconciled:
+        result = OPTIONB_GRAMMAR.accepts(text)
+        assert result == [(intent, slots)]
+
+    actual_texts = {t for t, _, _ in OPTIONB_GRAMMAR.all_phrases()}
+    expected_texts = {p for p, _, _ in reconciled} | {p for p, _, _ in WORD_FORM_36}
+    assert actual_texts == expected_texts
+
+
+def test_drift_guard_manifest_matches_grammar():
+    """Primary anchor (D1): the vendored manifest-transcript summary is
+    ground truth, derived from the real dataset's recorded transcripts, not
+    from hand-maintained documentation. Unlike the README anchor, this one
+    requires no reconciliation -- every manifest-derived phrase must match
+    CANONICAL_93 and be grammar-accepted exactly as-is."""
+    manifest_text = MANIFEST_SUMMARY_PATH.read_text(encoding="utf-8")
+    derived_canonical = _derive_canonical_from_table(manifest_text)
+
     assert {p for p, _, _ in derived_canonical} == {p for p, _, _ in CANONICAL_93}
 
     for text, intent, slots in derived_canonical:

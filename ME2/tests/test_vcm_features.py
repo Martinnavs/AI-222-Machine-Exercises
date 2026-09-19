@@ -5,7 +5,7 @@ from __future__ import annotations
 import torch
 import torchaudio
 
-from me2_voicegen.vcm.features import (
+from me2_voicegen.common.features import (
     HOP_LENGTH,
     N_MELS,
     LogMelFeatureExtractor,

@@ -26,11 +26,11 @@ from pathlib import Path
 import soundfile as sf
 import torch
 
-from me2_voicegen.cli_common import DEFAULT_BACKEND, build_config
-from me2_voicegen.cosyvoice_env import OUT_DIR
+from me2_voicegen.generation.cli_common import DEFAULT_BACKEND, build_config
+from me2_voicegen.generation.cosyvoice_env import OUT_DIR
 from me2_voicegen.synthesis.base import VoicePrompt, save_wav
 from me2_voicegen.synthesis.factory import create_synthesizer, get_backend_class, list_backends
-from me2_voicegen.transcribe import transcribe_cached
+from me2_voicegen.dataset_tools.transcribe import transcribe_cached
 
 logger = logging.getLogger(__name__)
 

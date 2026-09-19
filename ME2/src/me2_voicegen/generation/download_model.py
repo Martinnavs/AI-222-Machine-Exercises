@@ -2,7 +2,7 @@
 
 Idempotent: if the expected file manifest is already present, this is a
 fast no-op (no network call). Run via `make download-model` /
-`uv run python -m me2_voicegen.download_model`.
+`uv run python -m me2_voicegen.generation.download_model`.
 """
 
 from __future__ import annotations

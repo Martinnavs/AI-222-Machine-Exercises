@@ -4,7 +4,7 @@ import logging
 
 import numpy as np
 
-from me2_voicegen.cosyvoice_env import COSYVOICE_DIR
+from me2_voicegen.generation.cosyvoice_env import COSYVOICE_DIR
 
 from .base import Synthesizer, SynthesisResult, VoicePrompt
 
@@ -16,7 +16,7 @@ def _load_auto_model():
     --help, the fast test suite) with no vendor clone, no weights, and no GPU.
     Factored out of __init__ (rather than inlined) so tests can monkeypatch this
     one seam instead of needing a real `cosyvoice` package on sys.path."""
-    from me2_voicegen.cosyvoice_env import add_cosyvoice_to_syspath
+    from me2_voicegen.generation.cosyvoice_env import add_cosyvoice_to_syspath
 
     add_cosyvoice_to_syspath()
     from cosyvoice.cli.cosyvoice import AutoModel
@@ -25,7 +25,7 @@ def _load_auto_model():
 
 
 def _default_model_dir() -> str:
-    from me2_voicegen.download_model import target_dir
+    from me2_voicegen.generation.download_model import target_dir
 
     return str(target_dir())
 

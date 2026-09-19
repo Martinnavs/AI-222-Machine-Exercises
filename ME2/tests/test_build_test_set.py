@@ -12,7 +12,7 @@ from pathlib import Path
 
 import pytest
 
-import me2_voicegen.build_test_set as bts
+import me2_voicegen.dataset_tools.build_test_set as bts
 
 
 # ---------------------------------------------------------------------------

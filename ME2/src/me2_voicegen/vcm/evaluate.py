@@ -11,7 +11,7 @@ SET_REMINDER) have no SPEC_GRAMMAR rule at all; the other 10 (ALARM,
 TIMER, CALL, TIME, WEATHER, LIST_REMINDERS, DIM_UP, DIM_DOWN, and the two
 temperature-rule alternatives) DO have a `$CMD_*` BNF rule, but that rule
 requires a slot or different phrasing than the dataset's bare canonical
-phrase provides -- see `vcm.grammar`'s module docstring's "KNOWN GRAMMAR
+phrase provides -- see `vcm.optiona.grammar`'s module docstring's "KNOWN GRAMMAR
 LIMITATION" note and `tests/test_vcm_grammar.py::
 test_message_and_set_reminder_have_no_spec_grammar_rule` (which asserts
 the no-rule-at-all case for exactly those 2 intents, not all 12). So
@@ -53,17 +53,19 @@ from pathlib import Path
 
 import torch
 
+from me2_voicegen.common.features import LogMelFeatureExtractor
+from me2_voicegen.common.grammar_core import Grammar
 from me2_voicegen.vcm.dataset import VCMDataset
-from me2_voicegen.vcm.features import LogMelFeatureExtractor
-from me2_voicegen.vcm.grammar import SPEC_GRAMMAR, TOY_GRAMMAR, Grammar
+from me2_voicegen.vcm.optiona.grammar import SPEC_GRAMMAR, TOY_GRAMMAR
+from me2_voicegen.vcm.optiona.phrases import INTENT_PHRASES
+from me2_voicegen.vcm.optionb.grammar import OPTIONB_GRAMMAR
 from me2_voicegen.vcm.pipeline import infer_waveform, load_checkpoint
-from me2_voicegen.vcm.text import INTENT_PHRASES
 from me2_voicegen.vcm.train import LICENSE_NOTE
 
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
 DEFAULT_MANIFEST = PROJECT_ROOT / "out" / "conversions" / "v2" / "test_set" / "manifest.csv"
-DEFAULT_CHECKPOINT = PROJECT_ROOT / "out" / "vcm" / "checkpoint.pt"
-DEFAULT_SLOT_EVAL_MANIFEST = PROJECT_ROOT / "out" / "vcm" / "slot_eval" / "manifest.csv"
+DEFAULT_CHECKPOINT = PROJECT_ROOT / "out" / "vcm" / "checkpoints" / "checkpoint.pt"
+DEFAULT_SLOT_EVAL_MANIFEST = PROJECT_ROOT / "out" / "vcm" / "metadata" / "slot_eval" / "manifest.csv"
 DEFAULT_OUT_DIR = PROJECT_ROOT / "out" / "vcm"
 
 NEG_INF_THRESHOLD = float("-inf")
@@ -98,6 +100,31 @@ DEFAULT_THRESHOLD_GRID: tuple[float, ...] = (
 
 TARGET_BUCKET = "target_commands"
 REJECT_PROBE_BUCKETS = ("babble", "silence")
+
+# Grammar-selection registry for `--grammar` (default "spec,toy" reproduces
+# the original hardcoded SPEC_GRAMMAR/TOY_GRAMMAR pair bit-for-bit; "optionb"
+# adds OPTIONB_GRAMMAR (D11, .scratch/optionb-dataset/tickets/
+# 04-pipeline-wiring.md) so Option B rows can be decoded against their own
+# grammar instead of only ever producing VCM intent labels that can never
+# equal an Option B `label`.
+GRAMMAR_REGISTRY: dict[str, tuple[Grammar, str]] = {
+    "spec": (SPEC_GRAMMAR, "SPEC_GRAMMAR"),
+    "toy": (TOY_GRAMMAR, "TOY_GRAMMAR"),
+    "optionb": (OPTIONB_GRAMMAR, "OPTIONB_GRAMMAR"),
+}
+
+
+def _intent_labels_for(grammar_key: str) -> list[str]:
+    """Per-intent table row labels (render_markdown). SPEC/TOY keep the
+    full 20 dataset `INTENT_PHRASES` labels (including the ones SPEC_GRAMMAR
+    has no rule for at all -- that's the point of its coverage note, not a
+    gap to fix). OPTIONB_GRAMMAR's own label vocabulary is disjoint from
+    INTENT_PHRASES (e.g. BRIGHTNESS/COLOR/CREATE_REMINDER/TEMPERATURE vs.
+    DIM_UP/DIM_DOWN/SET_REMINDER/TEMP_UP/TEMP_DOWN), so it is derived from
+    the grammar itself rather than reusing INTENT_PHRASES."""
+    if grammar_key == "optionb":
+        return sorted({intent for _, intent, _ in OPTIONB_GRAMMAR.all_phrases()})
+    return sorted(INTENT_PHRASES)
 
 
 @dataclasses.dataclass
@@ -231,6 +258,7 @@ def evaluate_grammar(
     beam_width: int,
     device: str | torch.device,
     threshold_grid: tuple[float, ...] = DEFAULT_THRESHOLD_GRID,
+    intent_labels: list[str] | None = None,
 ) -> dict:
     val_results = decode_split(model, feature_extractor, val_dataset, grammar, beam_width, device)
     sweep = sweep_thresholds(val_results, threshold_grid)
@@ -249,6 +277,7 @@ def evaluate_grammar(
 
     return {
         "grammar": grammar_label,
+        "intent_labels": intent_labels if intent_labels is not None else sorted(INTENT_PHRASES),
         "threshold_sweep_on_val": sweep,
         "chosen_operating_threshold": threshold,
         "chosen_operating_point_val_stats": chosen,
@@ -294,7 +323,7 @@ def evaluate_slot_eval_set(
     threshold for `grammar_label`. Framed per this ticket's Action section:
     quantifies the KNOWN training gap (the acoustic model saw zero
     slot-word audio during training) -- NOT proof that slot extraction
-    works on real audio; `vcm.grammar`'s own synthetic-posterior tests are
+    works on real audio; `vcm.optiona.grammar`'s own synthetic-posterior tests are
     the correctness proof for the grammar/decoder side of slot
     extraction."""
     import torchaudio
@@ -342,7 +371,7 @@ def evaluate_slot_eval_set(
             "rates here are an EXPECTED consequence of that training-data "
             "gap, not a grammar/decoder defect -- the grammar/decoder's "
             "own correctness for slot extraction is proven separately by "
-            "vcm.grammar's synthetic-posterior unit tests, not by this "
+            "vcm.optiona.grammar's synthetic-posterior unit tests, not by this "
             "real-audio probe."
         ),
         "n_clips": n,
@@ -455,7 +484,7 @@ def render_markdown(report: dict) -> str:
         lines.append("")
         lines.append("| true intent | predicted distribution |")
         lines.append("|---|---|")
-        for label in sorted(INTENT_PHRASES):
+        for label in section.get("intent_labels", sorted(INTENT_PHRASES)):
             preds = ts["per_intent_confusion"].get(label, {})
             if not preds:
                 lines.append(f"| {label} | (no test-split clips) |")
@@ -540,16 +569,47 @@ def build_arg_parser() -> argparse.ArgumentParser:
         default=None,
         help="comma-separated float overrides for the val-split sweep grid",
     )
+    parser.add_argument(
+        "--grammar",
+        type=str,
+        default="spec,toy",
+        help=(
+            "comma-separated grammar keys to evaluate against, chosen from "
+            f"{sorted(GRAMMAR_REGISTRY)}. Default 'spec,toy' reproduces the "
+            "original SPEC_GRAMMAR/TOY_GRAMMAR pair unchanged. 'optionb' "
+            "selects OPTIONB_GRAMMAR and is only meaningful against a "
+            "manifest that (like out/conversions/v2/optionb/manifest.csv) "
+            "carries babble/silence reject-probe rows alongside its "
+            "target_commands rows -- otherwise REJECT_PROBE_BUCKETS is "
+            "empty and the val-split threshold sweep degenerates (see "
+            "docs/VCM-CONTRACT.md)."
+        ),
+    )
     return parser
 
 
 def main(argv: list[str] | None = None) -> None:
     args = build_arg_parser().parse_args(argv)
     args.out_dir.mkdir(parents=True, exist_ok=True)
+    metadata_dir = args.out_dir / "metadata"
+    metadata_dir.mkdir(parents=True, exist_ok=True)
 
     threshold_grid = DEFAULT_THRESHOLD_GRID
     if args.threshold_grid:
         threshold_grid = tuple(float(x) for x in args.threshold_grid.split(","))
+
+    grammar_keys = [g.strip().lower() for g in args.grammar.split(",") if g.strip()]
+    unknown_keys = [g for g in grammar_keys if g not in GRAMMAR_REGISTRY]
+    if unknown_keys:
+        raise SystemExit(
+            f"unknown --grammar value(s) {unknown_keys}; choices are {sorted(GRAMMAR_REGISTRY)}"
+        )
+    if not grammar_keys:
+        raise SystemExit("--grammar must name at least one grammar")
+    selected_grammars = [
+        (GRAMMAR_REGISTRY[key][0], GRAMMAR_REGISTRY[key][1], _intent_labels_for(key))
+        for key in grammar_keys
+    ]
 
     model, checkpoint_meta = load_checkpoint(args.checkpoint, device=args.device)
     feature_extractor = LogMelFeatureExtractor()
@@ -558,7 +618,7 @@ def main(argv: list[str] | None = None) -> None:
     test_dataset = VCMDataset(args.manifest, split="test", augmenter=None)
 
     grammar_sections = []
-    for grammar, label in [(SPEC_GRAMMAR, "SPEC_GRAMMAR"), (TOY_GRAMMAR, "TOY_GRAMMAR")]:
+    for grammar, label, intent_labels in selected_grammars:
         print(f"evaluating {label} ...")
         section = evaluate_grammar(
             model,
@@ -570,6 +630,7 @@ def main(argv: list[str] | None = None) -> None:
             args.beam_width,
             args.device,
             threshold_grid,
+            intent_labels,
         )
         grammar_sections.append(section)
         ts = section["test_split"]
@@ -588,9 +649,7 @@ def main(argv: list[str] | None = None) -> None:
     else:
         try:
             slot_eval_sections = []
-            for grammar, label, section in zip(
-                [SPEC_GRAMMAR, TOY_GRAMMAR], ["SPEC_GRAMMAR", "TOY_GRAMMAR"], grammar_sections
-            ):
+            for (grammar, label, _intent_labels), section in zip(selected_grammars, grammar_sections):
                 slot_eval_sections.append(
                     evaluate_slot_eval_set(
                         model,
@@ -619,11 +678,11 @@ def main(argv: list[str] | None = None) -> None:
         slot_eval_skipped_reason,
     )
 
-    json_path = args.out_dir / "eval_report.json"
+    json_path = metadata_dir / "eval_report.json"
     with json_path.open("w") as f:
         json.dump(report, f, indent=2)
 
-    md_path = args.out_dir / "eval_report.md"
+    md_path = metadata_dir / "eval_report.md"
     md_path.write_text(render_markdown(report))
 
     print(f"wrote {json_path} and {md_path}")

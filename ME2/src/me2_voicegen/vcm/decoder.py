@@ -1,4 +1,6 @@
-"""CTC prefix beam search constrained to a `vcm.grammar` character trie.
+"""CTC prefix beam search constrained to a `common.grammar_core` character
+trie (as compiled by a per-experiment grammar, e.g. `vcm.optiona.grammar` or
+`vcm.optionb.grammar`).
 
 Per decision (C) (see ticket .scratch/vcm-toy/tickets/03-grammar-decoder.md):
 plain Python only, no `kaldifst` (present in the venv but only transitive
@@ -7,7 +9,7 @@ installed). `kaldifst`/a real WFST is a plausible future scale-up path if
 the grammar ever grows past a few thousand phrases -- not needed here.
 
 At each search step, a beam can only extend to characters that are children
-of its current grammar-trie node (see `vcm.grammar.TrieNode`), so the
+of its current grammar-trie node (see `common.grammar_core.TrieNode`), so the
 search space is pruned to grammar-valid paths by construction rather than
 searched unconstrained and filtered after the fact.
 
@@ -21,8 +23,9 @@ from dataclasses import dataclass
 
 import numpy as np
 
+from me2_voicegen.common.grammar_core import Grammar, TrieNode
+
 from . import alphabet as vcm_alphabet
-from .grammar import Grammar, TrieNode
 
 NEG_INF = float("-inf")
 

@@ -10,7 +10,8 @@ Design (see ticket .scratch/vcm-toy/tickets/03-grammar-decoder.md, decision A):
   small enough here (~1.6k total phrases across all 11 rules) to fully
   enumerate at import time rather than build a generalized NFA.
 - `with_intent` stamps the final decoder-output intent (one of the 20
-  `vcm.text.INTENT_PHRASES` keys) onto a finished alternative list. Intent
+  `vcm.optiona.phrases.INTENT_PHRASES` keys) onto a finished alternative
+  list. Intent
   is attached per *alternative*, not per rule, because some BNF rules
   (`$CMD_LIGHTS_CTRL`, `$CMD_LIGHTS_DIM`, `$CMD_MEDIA_CTRL`) cover more than
   one INTENT_PHRASES key depending on which literal branch matched (e.g.
@@ -42,7 +43,7 @@ behavior.
 
 from __future__ import annotations
 
-from ..grammar_core import (  # re-export
+from me2_voicegen.common.grammar_core import (  # re-export
     EMPTY,
     Grammar,
     TrieNode,

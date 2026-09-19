@@ -7,8 +7,8 @@ from __future__ import annotations
 
 import pytest
 
-from me2_voicegen.vcm import grammar as g
-from me2_voicegen.vcm.text import INTENT_PHRASES
+from me2_voicegen.vcm.optiona import grammar as g
+from me2_voicegen.vcm.optiona.phrases import INTENT_PHRASES
 
 # ---------------------------------------------------------------------------
 # 1. Table-driven accept tests: every $CMD_* rule, every optional-token

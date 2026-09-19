@@ -30,9 +30,9 @@ from pathlib import Path
 import numpy as np
 import soundfile as sf
 
-from me2_voicegen.cli_common import DEFAULT_BACKEND, build_config
-from me2_voicegen.cosyvoice_env import OUT_DIR
-from me2_voicegen.personas import Persona, load_personas
+from me2_voicegen.generation.cli_common import DEFAULT_BACKEND, build_config
+from me2_voicegen.generation.cosyvoice_env import OUT_DIR
+from me2_voicegen.generation.personas import Persona, load_personas
 from me2_voicegen.synthesis.base import SynthesisResult
 from me2_voicegen.synthesis.factory import create_synthesizer, get_backend_class, list_backends
 

@@ -1,4 +1,4 @@
-"""Wav/waveform -> intent pipeline: log-mel features (`vcm.features`) ->
+"""Wav/waveform -> intent pipeline: log-mel features (`common.features`) ->
 trained CTC model (`vcm.model`) -> grammar-constrained decoder
 (`vcm.decoder`) -> a final `{intent, slots, confidence}` result or an
 explicit rejection.
@@ -14,7 +14,7 @@ Two modes:
       reported as several separate triggers. Sample-counted (not
       wall-clock-timed) so its debounce behavior is deterministic and
       testable without real time passing; a caller streaming real
-      microphone audio at `vcm.features.SAMPLE_RATE` gets real-time
+      microphone audio at `common.features.SAMPLE_RATE` gets real-time
       behavior for free since sample count IS elapsed time at a fixed
       sample rate.
 
@@ -31,9 +31,9 @@ from pathlib import Path
 import numpy as np
 import torch
 
+from me2_voicegen.common.features import SAMPLE_RATE, LogMelFeatureExtractor
+from me2_voicegen.common.grammar_core import Grammar
 from me2_voicegen.vcm.decoder import DecodeResult, decode
-from me2_voicegen.vcm.features import SAMPLE_RATE, LogMelFeatureExtractor
-from me2_voicegen.vcm.grammar import Grammar
 from me2_voicegen.vcm.model import MatchboxNetConfig, MatchboxNetCTC
 
 WINDOW_S = 1.5

@@ -4,7 +4,7 @@ Fast tests below exercise pure Python/torch/numpy plumbing (window shape,
 dummy-feature shape, the calibration reader's manifest handling, Markdown
 rendering) -- none of them import `onnx`, call `torch.onnx.export`, or
 touch `onnxruntime.InferenceSession`, and none of them need
-`out/vcm/checkpoint.pt`. Per ticket 06's acceptance criteria, the fast
+`out/vcm/checkpoints/checkpoint.pt`. Per ticket 06's acceptance criteria, the fast
 suite (`pytest -m 'not slow'`) must not require a trained checkpoint or the
 ONNX runtime path.
 
@@ -12,7 +12,7 @@ ONNX runtime path.
 `torch.onnx.export` + `onnxruntime` inference, proving ONNX-vs-PyTorch
 logit parity on a fixed input (this ticket's acceptance criterion 2) and
 exercising real static INT8 quantization end to end, against the real
-trained checkpoint at `out/vcm/checkpoint.pt` (skipped if that file is
+trained checkpoint at `out/vcm/checkpoints/checkpoint.pt` (skipped if that file is
 absent, e.g. before ticket 04 has produced one on a given machine).
 """
 
@@ -41,7 +41,7 @@ from me2_voicegen.vcm.export_onnx import (
 )
 from me2_voicegen.vcm.model import MatchboxNetConfig, MatchboxNetCTC
 
-REAL_CHECKPOINT = Path("out/vcm/checkpoint.pt")
+REAL_CHECKPOINT = Path("out/vcm/checkpoints/checkpoint.pt")
 
 
 def _target_command_specs(n: int = 40) -> list[dict]:
@@ -126,7 +126,7 @@ def test_render_markdown_labels_hardware_and_not_rpi_for_measured_int8():
         "window_seconds": 1.5,
         "n_frames": 151,
         "onnxruntime_threads": {"intra_op": 1, "inter_op": 1},
-        "checkpoint": "out/vcm/checkpoint.pt",
+        "checkpoint": "out/vcm/checkpoints/checkpoint.pt",
         "preset": "default",
         "fp32": {
             "onnx_size_mb": 0.97,
@@ -170,7 +170,7 @@ def test_render_markdown_labels_unmeasured_int8_as_estimate():
         "window_seconds": 1.5,
         "n_frames": 151,
         "onnxruntime_threads": {"intra_op": 1, "inter_op": 1},
-        "checkpoint": "out/vcm/checkpoint.pt",
+        "checkpoint": "out/vcm/checkpoints/checkpoint.pt",
         "preset": "default",
         "fp32": {
             "onnx_size_mb": 0.97,
@@ -226,7 +226,7 @@ def test_onnx_export_logits_match_pytorch_within_tolerance_synthetic_model():
 
 
 @pytest.mark.slow
-@pytest.mark.skipif(not REAL_CHECKPOINT.exists(), reason="no trained checkpoint at out/vcm/checkpoint.pt")
+@pytest.mark.skipif(not REAL_CHECKPOINT.exists(), reason="no trained checkpoint at out/vcm/checkpoints/checkpoint.pt")
 def test_onnx_export_logits_match_pytorch_on_real_checkpoint():
     model, _ckpt = load_checkpoint(REAL_CHECKPOINT)
 
@@ -242,7 +242,7 @@ def test_onnx_export_logits_match_pytorch_on_real_checkpoint():
 
 
 @pytest.mark.slow
-@pytest.mark.skipif(not REAL_CHECKPOINT.exists(), reason="no trained checkpoint at out/vcm/checkpoint.pt")
+@pytest.mark.skipif(not REAL_CHECKPOINT.exists(), reason="no trained checkpoint at out/vcm/checkpoints/checkpoint.pt")
 def test_static_int8_quantization_shrinks_model_and_quantizes_conv(vcm_fake_manifest_factory):
     model, _ckpt = load_checkpoint(REAL_CHECKPOINT)
 

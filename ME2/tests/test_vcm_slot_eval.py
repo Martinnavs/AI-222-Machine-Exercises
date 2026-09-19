@@ -4,7 +4,7 @@ import numpy as np
 import pytest
 import soundfile as sf
 
-from me2_voicegen.personas import Persona
+from me2_voicegen.generation.personas import Persona
 from me2_voicegen.synthesis.base import SynthesisResult, Synthesizer, VoicePrompt
 from me2_voicegen.vcm import slot_eval_set as mod
 

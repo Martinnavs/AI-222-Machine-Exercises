@@ -1,10 +1,13 @@
 """CTC training CLI for the toy VCM acoustic model (`vcm.model`).
 
-Trains `MatchboxNetCTC` (the `default` preset -- the `spec-scale` preset
-exists only for size-budget reporting, per ticket 04's Non-Goals, and is
-never trained here) against `out/conversions/v2/test_set/manifest.csv`'s
-`train` split, with Task 02's RIR + additive-noise + SpecAugment pipeline
-all active by default.
+Trains `MatchboxNetCTC` against `out/conversions/v2/test_set/manifest.csv`'s
+`train` split (or any other manifest passed via `--manifest`), with Task
+02's RIR + additive-noise + SpecAugment pipeline all active by default.
+`--preset` selects the model capacity: `default` (~254k params) is the
+usual choice; `optionc` (~754k params) is a mid-scale config for testing
+whether more parameters improve decode accuracy on the same manifest;
+`spec-scale` (~2.14M params) exists only for size-budget reporting, per
+ticket 04's Non-Goals, and is not expected to be trained here.
 
 License note (docs/VCM-CONTRACT.md section 8): `background_noise` (feeding
 the `silence` bucket) is ESC-50, CC-BY-NC-SA-4.0. Any checkpoint trained on
@@ -26,10 +29,10 @@ import torch
 from torch import nn
 from torch.utils.data import DataLoader, Subset
 
+from me2_voicegen.common.augment import Augmenter
+from me2_voicegen.common.features import LogMelFeatureExtractor
 from me2_voicegen.vcm import alphabet
-from me2_voicegen.vcm.augment import Augmenter
 from me2_voicegen.vcm.dataset import VCMDataset, collate_fn
-from me2_voicegen.vcm.features import LogMelFeatureExtractor
 from me2_voicegen.vcm.model import PRESETS, MatchboxNetCTC, estimated_int8_bytes, param_count
 from me2_voicegen.vcm.text import normalize_text, resolve_transcript
 
@@ -68,6 +71,38 @@ def greedy_decode(logits: torch.Tensor) -> str:
     """`(T, alphabet_size)` logits for one utterance -> decoded text."""
     ids = logits.argmax(dim=-1).tolist()
     return alphabet.decode(alphabet.collapse(ids))
+
+
+def _batchnorm_modules(model: nn.Module) -> list[nn.modules.batchnorm._BatchNorm]:
+    return [m for m in model.modules() if isinstance(m, nn.modules.batchnorm._BatchNorm)]
+
+
+BatchNormSnapshot = list[tuple[torch.Tensor, torch.Tensor, torch.Tensor]]
+
+
+def snapshot_batchnorm_stats(model: nn.Module) -> BatchNormSnapshot:
+    """Clone every BatchNorm layer's `running_mean`/`running_var`/
+    `num_batches_tracked` so a step that turns out non-finite can be
+    undone. A `forward()` call updates these running stats as a side
+    effect *before* the loss is even computed, so a post-hoc
+    `if not finite: continue` on the loss can skip the backward/optimizer
+    step but cannot un-poison stats already written into the BN buffers --
+    that's what leaves `eval()` mode permanently broken. Snapshotting
+    before the forward pass and restoring on a bad step is what actually
+    prevents the poisoning."""
+    return [
+        (m.running_mean.clone(), m.running_var.clone(), m.num_batches_tracked.clone())
+        for m in _batchnorm_modules(model)
+    ]
+
+
+def restore_batchnorm_stats(model: nn.Module, snapshot: BatchNormSnapshot) -> None:
+    for module, (running_mean, running_var, num_batches_tracked) in zip(
+        _batchnorm_modules(model), snapshot
+    ):
+        module.running_mean.copy_(running_mean)
+        module.running_var.copy_(running_var)
+        module.num_batches_tracked.copy_(num_batches_tracked)
 
 
 @torch.no_grad()
@@ -125,7 +160,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--manifest", type=Path, default=DEFAULT_MANIFEST)
     parser.add_argument("--out-dir", type=Path, default=Path("out/vcm"))
-    parser.add_argument("--preset", default="default", choices=["default", "spec-scale"])
+    parser.add_argument("--preset", default="default", choices=["default", "spec-scale", "optionc"])
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--max-minutes", type=float, default=30.0)
     parser.add_argument("--max-epochs", type=int, default=150)
@@ -169,6 +204,10 @@ def main(argv: list[str] | None = None) -> None:
     use_amp = args.amp if args.amp is not None else device.type == "cuda"
 
     args.out_dir.mkdir(parents=True, exist_ok=True)
+    checkpoints_dir = args.out_dir / "checkpoints"
+    metadata_dir = args.out_dir / "metadata"
+    checkpoints_dir.mkdir(parents=True, exist_ok=True)
+    metadata_dir.mkdir(parents=True, exist_ok=True)
 
     feature_extractor = LogMelFeatureExtractor()
     train_augmenter = Augmenter(
@@ -232,6 +271,7 @@ def main(argv: list[str] | None = None) -> None:
     start_time = time.monotonic()
     deadline_hit = False
     nan_or_inf_seen = False
+    checkpoint_written = False
     epoch = 0
 
     for epoch in range(1, args.max_epochs + 1):
@@ -254,6 +294,7 @@ def main(argv: list[str] | None = None) -> None:
             target_ids = batch["target_ids"].to(device)
             target_len = batch["target_len"].to(device)
 
+            bn_snapshot = snapshot_batchnorm_stats(model)
             optimizer.zero_grad(set_to_none=True)
             with torch.cuda.amp.autocast(enabled=use_amp):
                 logits = model(features)
@@ -262,7 +303,11 @@ def main(argv: list[str] | None = None) -> None:
 
             if not torch.isfinite(loss):
                 nan_or_inf_seen = True
-                print(f"WARNING: non-finite loss at epoch {epoch} step {step}: {loss.item()}")
+                restore_batchnorm_stats(model, bn_snapshot)
+                print(
+                    f"WARNING: non-finite loss at epoch {epoch} step {step}: {loss.item()} "
+                    "-- batch skipped, BatchNorm running stats restored to pre-step values"
+                )
                 continue
 
             scaler.scale(loss).backward()
@@ -314,8 +359,9 @@ def main(argv: list[str] | None = None) -> None:
                     "val_loss": val_loss,
                     "license": LICENSE_NOTE,
                 },
-                args.out_dir / "checkpoint.pt",
+                checkpoints_dir / "checkpoint.pt",
             )
+            checkpoint_written = True
         else:
             epochs_without_improvement += 1
             if epochs_without_improvement >= args.patience:
@@ -337,13 +383,20 @@ def main(argv: list[str] | None = None) -> None:
         "total_wall_clock_s": total_wall_s,
         "history": history,
     }
-    with (args.out_dir / "loss_history.json").open("w") as f:
+    with (metadata_dir / "loss_history.json").open("w") as f:
         json.dump(loss_history, f, indent=2)
 
     print(
         f"done: epochs={epoch} best_val_loss={best_val_loss:.4f} "
         f"wall_clock_s={total_wall_s:.1f} deadline_hit={deadline_hit} nan_or_inf_seen={nan_or_inf_seen}"
     )
+
+    if not checkpoint_written:
+        raise SystemExit(
+            f"ERROR: training run finished after {epoch} epoch(s) without ever writing a "
+            f"checkpoint (best_val_loss={best_val_loss}). This is a failed run, not a normal "
+            "'done' exit -- see loss_history.json for per-epoch detail."
+        )
 
 
 if __name__ == "__main__":

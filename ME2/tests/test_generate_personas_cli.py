@@ -6,7 +6,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from me2_voicegen import generate_personas
+from me2_voicegen.generation import generate_personas
 from me2_voicegen.synthesis.base import SynthesisResult, Synthesizer
 from me2_voicegen.synthesis.factory import _BACKENDS
 

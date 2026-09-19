@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from me2_voicegen.personas import Persona, load_personas
+from me2_voicegen.generation.personas import Persona, load_personas
 
 
 def _write_manifest(tmp_path: Path, entries: list[dict], filename: str = "personas.json") -> Path:

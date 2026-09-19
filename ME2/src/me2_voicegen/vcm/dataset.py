@@ -16,9 +16,9 @@ rows; callers that need to skip them for CTC loss should iterate
 `loss_bearing_indices` (directly, or via a `Subset`/`Sampler`) rather than
 filtering ad hoc.
 
-Uses `vcm.features.LogMelFeatureExtractor` (the one and only feature
+Uses `common.features.LogMelFeatureExtractor` (the one and only feature
 front-end for this whole feature, per docs/VCM-CONTRACT.md section 5) and,
-optionally, a `vcm.augment.Augmenter` -- OFF by default, and expected to
+optionally, a `common.augment.Augmenter` -- OFF by default, and expected to
 stay off whenever `split != "train"` (eval-mode skew is exactly the thing
 augmentation-on-by-default would risk).
 """
@@ -33,9 +33,9 @@ import torch
 import torchaudio
 from torch.utils.data import Dataset
 
+from me2_voicegen.common.augment import Augmenter
+from me2_voicegen.common.features import LogMelFeatureExtractor
 from me2_voicegen.vcm import alphabet
-from me2_voicegen.vcm.augment import Augmenter
-from me2_voicegen.vcm.features import LogMelFeatureExtractor
 from me2_voicegen.vcm.text import normalize_text, resolve_transcript
 
 

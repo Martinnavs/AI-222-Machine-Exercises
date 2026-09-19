@@ -11,7 +11,12 @@ from torch import nn
 
 from me2_voicegen.vcm import alphabet
 from me2_voicegen.vcm.model import MatchboxNetConfig, MatchboxNetCTC
-from me2_voicegen.vcm.train import build_arg_parser, greedy_decode
+from me2_voicegen.vcm.train import (
+    build_arg_parser,
+    greedy_decode,
+    restore_batchnorm_stats,
+    snapshot_batchnorm_stats,
+)
 
 
 def _tiny_batch():
@@ -93,6 +98,91 @@ def test_zero_length_target_row_yields_finite_loss():
     log_probs = logits.log_softmax(dim=-1).transpose(0, 1)
     loss = criterion(log_probs, target_ids, input_lengths, target_len)
     assert torch.isfinite(loss)
+
+
+def test_nonfinite_training_batch_does_not_poison_batchnorm_running_stats():
+    """R1-01 regression: a single non-finite training batch used to leave
+    every `nn.BatchNorm1d` layer's running stats permanently non-finite
+    (a forward pass updates them as a side effect before the loss is even
+    checked), so the model's `eval()`-mode output on later, clean input
+    stayed non-finite forever even though `train()`-mode looked healthy.
+    This exercises the same snapshot/restore `vcm.train`'s real loop now
+    performs around a bad step, and asserts eval-mode output on clean
+    input is finite afterward.
+    """
+    torch.manual_seed(2)
+    n_mels = 40
+    config = MatchboxNetConfig(
+        n_mels=n_mels, n_blocks=2, channels=24, kernel_sizes=[5, 5], prologue_channels=16, epilogue_channels=24
+    )
+    model = MatchboxNetCTC(config)
+    criterion = nn.CTCLoss(blank=0, zero_infinity=True)
+    optimizer = torch.optim.AdamW(model.parameters(), lr=1e-3)
+
+    clean_features = torch.randn(2, n_mels, 20)
+    input_lengths = torch.tensor([20, 20], dtype=torch.long)
+    target_ids = torch.cat(
+        [torch.tensor(alphabet.encode(w), dtype=torch.long) for w in ["go", "ok"]]
+    )
+    target_len = torch.tensor([len(alphabet.encode(w)) for w in ["go", "ok"]], dtype=torch.long)
+
+    # Sanity: model is healthy in eval() mode on clean input before the bad step.
+    model.eval()
+    with torch.no_grad():
+        pre_logits = model(clean_features)
+    assert torch.isfinite(pre_logits).all()
+
+    bad_features = clean_features.clone()
+    bad_features[0, 0, 0] = float("nan")
+
+    model.train()
+    bn_snapshot = snapshot_batchnorm_stats(model)
+    optimizer.zero_grad(set_to_none=True)
+    logits = model(bad_features)
+    log_probs = logits.log_softmax(dim=-1).transpose(0, 1)
+    loss = criterion(log_probs, target_ids, input_lengths, target_len)
+    assert not torch.isfinite(loss)
+
+    # Mirrors vcm.train's own bad-step handling: restore BN stats, skip
+    # the backward/optimizer step, don't just `continue` past the symptom.
+    restore_batchnorm_stats(model, bn_snapshot)
+
+    model.eval()
+    with torch.no_grad():
+        post_logits = model(clean_features)
+    assert torch.isfinite(post_logits).all(), (
+        "eval()-mode output on clean input is non-finite after a rejected "
+        "non-finite training batch -- BatchNorm running stats were poisoned"
+    )
+
+
+def test_batchnorm_snapshot_restore_reverts_all_batchnorm_layers():
+    """Directly proves restore_batchnorm_stats() actually reverts every
+    BatchNorm1d layer's running_mean/running_var/num_batches_tracked, not
+    just some -- this is the mechanism the training loop relies on."""
+    torch.manual_seed(3)
+    config = MatchboxNetConfig(
+        n_mels=40, n_blocks=3, channels=32, kernel_sizes=[5, 5, 5], prologue_channels=16, epilogue_channels=32
+    )
+    model = MatchboxNetCTC(config)
+    bn_layers = [m for m in model.modules() if isinstance(m, nn.BatchNorm1d)]
+    # prologue(1) + block1 main+residual(2, in/out channel mismatch) + block2(1) + block3(1) + epilogue(2)
+    assert len(bn_layers) == 7
+
+    model.train()
+    snapshot = snapshot_batchnorm_stats(model)
+    before = [(m.running_mean.clone(), m.running_var.clone()) for m in bn_layers]
+
+    with torch.no_grad():
+        model(torch.randn(2, 40, 20) * 5.0)
+
+    after = [(m.running_mean.clone(), m.running_var.clone()) for m in bn_layers]
+    assert any(not torch.equal(b[0], a[0]) or not torch.equal(b[1], a[1]) for b, a in zip(before, after))
+
+    restore_batchnorm_stats(model, snapshot)
+    for m, (running_mean, running_var) in zip(bn_layers, before):
+        assert torch.equal(m.running_mean, running_mean)
+        assert torch.equal(m.running_var, running_var)
 
 
 def test_onecycle_epochs_defaults_to_max_epochs_not_a_fixed_horizon():

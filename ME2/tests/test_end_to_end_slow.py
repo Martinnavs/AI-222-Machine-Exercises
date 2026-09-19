@@ -15,7 +15,7 @@ import numpy as np
 import pytest
 import soundfile as sf
 
-from me2_voicegen.download_model import missing_manifest_entries, target_dir
+from me2_voicegen.generation.download_model import missing_manifest_entries, target_dir
 from me2_voicegen.synthesis import save_wav
 from me2_voicegen.synthesis.cosyvoice2_backend import CosyVoice2Synthesizer
 from me2_voicegen.synthesis.factory import create_synthesizer

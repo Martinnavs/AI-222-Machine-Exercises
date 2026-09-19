@@ -9,8 +9,8 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
-# src/me2_voicegen/cosyvoice_env.py -> parents[2] is the ME2 project root.
-PROJECT_ROOT = Path(__file__).resolve().parents[2]
+# src/me2_voicegen/generation/cosyvoice_env.py -> parents[3] is the ME2 project root.
+PROJECT_ROOT = Path(__file__).resolve().parents[3]
 
 VENDOR_ROOT = PROJECT_ROOT / "vendor"
 COSYVOICE_DIR = VENDOR_ROOT / "CosyVoice"

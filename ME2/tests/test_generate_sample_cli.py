@@ -6,7 +6,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from me2_voicegen import generate_sample
+from me2_voicegen.generation import generate_sample
 from me2_voicegen.synthesis.base import SynthesisResult, Synthesizer, VoicePrompt
 from me2_voicegen.synthesis.factory import _BACKENDS
 
@@ -37,7 +37,7 @@ def test_no_backend_specific_identifiers_in_generate_sample_source() -> None:
     key "cosyvoice2" (outside DEFAULT_BACKEND), the vendor entry point AutoModel,
     and the vendor method inference_zero_shot. It does NOT ban this file's
     documented reliance (see this ticket's Shared Context) on
-    me2_voicegen.cosyvoice_env - a Ticket 01 shared-infra module (vendor/models/out
+    me2_voicegen.generation.cosyvoice_env - a Ticket 01 shared-infra module (vendor/models/out
     path resolution) whose name happens to contain "cosyvoice" as a substring but
     carries no backend-specific dispatch logic of its own; it's imported here only
     for OUT_DIR. What's actually banned there is importing the *vendor package*
