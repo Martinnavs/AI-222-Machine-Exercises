@@ -13,7 +13,9 @@ that a fast, no-vendor, no-GPU environment is supposed to exercise.
 
 from __future__ import annotations
 
+import subprocess
 import sys
+from pathlib import Path
 
 import pytest
 
@@ -63,3 +65,82 @@ def test_cosyvoice2_backend_module_import_alone_does_not_touch_vendor() -> None:
     from me2_voicegen.synthesis import cosyvoice2_backend  # noqa: F401
 
     assert "cosyvoice" not in sys.modules
+
+
+# ---------------------------------------------------------------------------
+# vcm-toy feature (ticket 08's own cross-cutting regression test): every
+# `vcm.*` module must import cleanly with no vendor CosyVoice import, so
+# adding this whole feature never drags GPU/TTS-vendor weight requirements
+# into the fast suite by accident. `vcm.slot_eval_set` is the one module in
+# this subpackage that *does* import from `me2_voicegen.synthesis`/
+# `me2_voicegen.personas` (it reuses the existing TTS pipeline per ticket
+# 07) - that's exactly the case this guard exists to catch if it ever stops
+# being import-time-lazy.
+# ---------------------------------------------------------------------------
+
+_VCM_MODULES = [
+    "me2_voicegen.vcm.alphabet",
+    "me2_voicegen.vcm.text",
+    "me2_voicegen.vcm.features",
+    "me2_voicegen.vcm.augment",
+    "me2_voicegen.vcm.dataset",
+    "me2_voicegen.vcm.grammar",
+    "me2_voicegen.vcm.decoder",
+    "me2_voicegen.vcm.model",
+    "me2_voicegen.vcm.train",
+    "me2_voicegen.vcm.pipeline",
+    "me2_voicegen.vcm.evaluate",
+    "me2_voicegen.vcm.export_onnx",
+    "me2_voicegen.vcm.benchmark",
+    "me2_voicegen.vcm.slot_eval_set",
+]
+
+# Option B grammar feature (ticket 02): pure-stdlib string-matching modules
+# with no reason to ever import the vendor package, but nothing stops a
+# later change from adding one - same regression guard as _VCM_MODULES.
+_OPTIONB_MODULES = [
+    "me2_voicegen.grammar_core",
+    "me2_voicegen.optionb.text",
+    "me2_voicegen.optionb.numbers",
+    "me2_voicegen.optionb.grammar",
+]
+
+
+def test_vcm_subpackage_modules_never_import_cosyvoice_vendor_package() -> None:
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            "import sys\n" + "\n".join(f"import {m}" for m in _VCM_MODULES) + "\n"
+            "print('cosyvoice' in sys.modules)",
+        ],
+        cwd=str(Path(__file__).resolve().parents[1]),
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    assert result.stdout.strip() == "False", (
+        "importing a vcm.* module pulled the real vendor `cosyvoice` package "
+        f"into sys.modules - this would break the fast suite's GPU/vendor-free "
+        f"guarantee. stdout={result.stdout!r} stderr={result.stderr!r}"
+    )
+
+
+def test_optionb_subpackage_modules_never_import_cosyvoice_vendor_package() -> None:
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            "import sys\n" + "\n".join(f"import {m}" for m in _OPTIONB_MODULES) + "\n"
+            "print('cosyvoice' in sys.modules)",
+        ],
+        cwd=str(Path(__file__).resolve().parents[1]),
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    assert result.stdout.strip() == "False", (
+        "importing an optionb.* module pulled the real vendor `cosyvoice` "
+        f"package into sys.modules - this would break the fast suite's "
+        f"GPU/vendor-free guarantee. stdout={result.stdout!r} stderr={result.stderr!r}"
+    )

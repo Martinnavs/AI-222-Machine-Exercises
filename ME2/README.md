@@ -322,7 +322,8 @@ TensorRT/DeepSpeed acceleration, and no web UI:
 | `tensorrt-cu12`, `tensorrt-cu12-bindings`, `tensorrt-cu12-libs` | needs `load_trt=True`, which defaults to `False` and is never set here |
 | `onnxruntime-gpu==1.18.0` | replaced with CPU `onnxruntime==1.18.0` — CosyVoice's ONNX components (speech tokenizer, campplus) fall back to CPU with a warning, not a failure, when handed `CUDAExecutionProvider` and it isn't available |
 | `gradio`, `fastapi`, `fastapi-cli`, `uvicorn`, `grpcio`, `grpcio-tools` | webui/runtime-server only, unused by direct `AutoModel` inference |
-| `tensorboard`, `onnx` | training helpers |
+| `tensorboard` | training helper |
+| ~~`onnx`~~ | ~~training helper~~ — **re-added** for the unrelated `vcm-toy` feature's Task 06 (ONNX export/quantization/benchmark of the toy VCM CTC model), pinned `onnx==1.16.1`. This is a deliberate, documented reversal of the original CosyVoice-spike exclusion, not an oversight: `onnx` (the export/graph package) was never needed for CosyVoice's own `AutoModel`/`inference_zero_shot` inference path, but `vcm.export_onnx` (task 06) needs it to build/quantize an ONNX graph from the trained `vcm.model` checkpoint. See `docs/raw_requirements/` and `.scratch/vcm-toy/tickets/06-onnx-export-benchmark.md`. |
 | `gdown`, `wget` | **re-added** during this spike — see below |
 
 **`gdown` and `wget` were re-added.** They looked like training-only helpers from an import grep
@@ -381,3 +382,173 @@ above, not a check of distinct-voice cloning, which requires real, distinct, use
 model download and the vendor clone along with cheap-to-regenerate build artifacts, so
 re-running setup after `make clean` means repeating steps 2-3 above (`make vendor`,
 `make download-model`) too, not just `make sync`.
+
+## VCM toy — toy Voice Command Model (CTC acoustic model + grammar decoder)
+
+**What this is.** A toy, first-pass validation of a much larger target spec — a
+Raspberry-Pi-deployable, zero-cloud voice command system built from a tiny CTC acoustic
+model plus a grammar-constrained decoder. This pass deliberately used only data already on
+disk (`out/conversions/v2/test_set/`, built by the conversion/dataset-assembly pipeline
+described earlier in this README) to validate the approach end-to-end *before* any decision
+to scale up to real/larger data. Nothing here should be read as a claim that the approach
+generalizes beyond this toy scale — see "Known gaps" below.
+
+The full technical contract (alphabet, text normalization, transcript-resolution rules,
+feature/batch conventions, decoder I/O shape, license provenance) lives in
+[`docs/VCM-CONTRACT.md`](docs/VCM-CONTRACT.md) — read that instead of this section for exact
+shapes/columns; this section covers what was built, how to run it, and what the real results
+were.
+
+### Architecture
+
+- **Acoustic model** (`src/me2_voicegen/vcm/model.py`): a MatchboxNet-style 1D
+  time-channel-separable CNN CTC model, outputting logits over a 29-token character
+  alphabet (blank + `a`-`z` + space + apostrophe). Note: the original spec text says "32
+  tokens," but its own enumeration only ever lists 29 — this is a documented discrepancy,
+  not a bug; we did not pad to 32. A `default` preset (~254k params, sized for this toy
+  corpus) was actually trained; a `--preset spec-scale` config (~2.1M params, inside the
+  original spec's stated 1.2M-2.5M range) was instantiated and size-checked, but never
+  trained this pass.
+- **Decoder** (`src/me2_voicegen/vcm/grammar.py`, `decoder.py`): a hand-written Python
+  grammar/trie plus CTC prefix beam search — not an FST library. `kaldifst` was present in
+  the venv (transitively) but deliberately not used; this was a design decision, not a
+  missing dependency, and is noted as a possible future scale-up path. Two grammars are
+  exposed, never merged:
+  - `SPEC_GRAMMAR` — the user's BNF spec, compiled verbatim.
+  - `TOY_GRAMMAR` — `SPEC_GRAMMAR` plus a labeled `TOY_ALIASES` overlay covering the 12 of
+    the 20 dataset intents whose bare canonical phrase doesn't parse under the verbatim
+    spec. Only 2 of those 12 (`MESSAGE`, `SET_REMINDER`) have literally no BNF rule at all;
+    the other 10 have a real `$CMD_*` rule that requires a slot or different phrasing than
+    the dataset's bare phrase provides (e.g. `$CMD_SET_ALARM` requires an `am`/`pm` slot,
+    but the dataset's `ALARM` phrase is just "set alarm").
+  - One genuine spec gap, not a bug: `$CMD_TEMPERATURE`'s BNF (`(set | adjust) (the)?
+    temperature to $NUMBER (degrees)?`) has no up/down direction at all, so a
+    SPEC_GRAMMAR-parsed temperature phrase can't be resolved to `TEMP_UP` vs `TEMP_DOWN`.
+    Only the toy alias bare words ("warmer"/"cooler") are unambiguous. Fixing this would
+    require a change to the BNF spec itself, not the decoder.
+- **Training** (`train.py`) uses on-the-fly RIR convolution (RT60 sampled in [0.1, 0.5]s),
+  additive noise (SNR sampled in [5, 25]dB), and SpecAugment — all per the original
+  requirements.
+
+### Reproducing
+
+```bash
+cd ME2
+make vcm-train    # train the acoustic model
+make vcm-eval      # evaluate the trained checkpoint (SPEC + TOY grammar sections)
+make vcm-bench     # ONNX export + INT8 quantization + CPU latency/size benchmark
+```
+
+**Important — `train.py`'s shipped CLI defaults (`--max-epochs 150 --patience 10`) do NOT
+reproduce the checkpoint the results below are measured against.** The real run that
+produced it used higher values, to make use of available wall-clock budget after an
+earlier noise-pool I/O bottleneck was fixed. The literal reproducing command was:
+
+```bash
+uv run python -m me2_voicegen.vcm.train \
+  --device cuda:2 --max-minutes 30 --seed 0 \
+  --max-epochs 300 --patience 60 --out-dir out/vcm
+```
+
+(`--device` should be any free GPU index on your machine, not necessarily `cuda:2` —
+running `make vcm-train` with its stock defaults will train *a* checkpoint, just not one
+whose numbers match the section below without also overriding `--max-epochs`/`--patience`
+as shown.)
+
+### Real results (honestly framed — do not read these as generalization evidence)
+
+**Training** (`out/vcm/checkpoint.pt`, `out/vcm/loss_history.json`): val CTC loss fell from
+**105.34** (epoch 0) to **1.04** (best, epoch 165) over 225 epochs (~18 min wall-clock, well
+inside the 30-minute cap). Greedy-decoding all 292 held-out `target_commands` val clips
+against the best checkpoint: **290/292 (99.3%)** produced a non-empty decode, **194/292
+(66.4%)** decoded to an exact character-for-character match of the canonical phrase. This
+reads as toy-scale memorization of the 20 closed-set canonical phrases the dataset actually
+contains, not demonstrated generalization — every `target_commands` row (train/val/test
+alike) is a synthetic TTS render of one of those same 20 phrases.
+
+**Evaluation** (`out/vcm/eval_report.md`, `.json`), grammar-constrained beam search + a
+per-grammar operating threshold chosen by a val-split sweep (never on `test`):
+- `TOY_GRAMMAR`: **91.1%** test-split exact-match (133/146 accepted, all 133 also
+  intent-correct).
+- `SPEC_GRAMMAR`: **30.8%** test-split exact-match (45/146). This is a grammar-coverage
+  artifact, not a model failure: only 2 of the 20 intents (`MESSAGE`, `SET_REMINDER`) have
+  literally no BNF rule; the other 10 of the 12 non-passing intents have a real `$CMD_*`
+  rule that requires a slot/phrasing the dataset's bare canonical phrase doesn't supply.
+- **0% false-accept** on `babble`/`silence` at each grammar's chosen operating threshold —
+  but this is threshold-specific, not an unconditional property: the val-split sweep shows
+  TOY_GRAMMAR's false-accept rate climbing to **42.7%** at looser thresholds (past roughly
+  -0.4) and plateauing there.
+
+**Benchmark** (`out/vcm/vcm_benchmark.md`, `.json`) — ONNX export + static INT8
+quantization of the trained (toy-scale, ~254k-param) checkpoint:
+- Model file size: fp32 ONNX **1,020,103 bytes**, INT8 ONNX **277,219 bytes** — well under
+  the original spec's 5MB budget, but at toy model scale, not the spec's full 1.2M-2.5M
+  param target (that `spec-scale` preset was instantiated and sized, never trained).
+- **Every single benchmark number below was measured on this node's AMD EPYC 7742 CPU —
+  this node has no Raspberry Pi hardware, and none of these numbers are RPi measurements.**
+  Latency pinned to 1 intra-op/1 inter-op onnxruntime thread, window = 1.5s:
+
+  | variant | size (MB) | p50 (ms) | p95 (ms) | process peak RSS (MB) | inference-only RSS delta (KB) |
+  |---|---|---|---|---|---|
+  | fp32 ONNX | 0.973 | 1.065 | 1.076 | 423.895 | 0 |
+  | INT8 ONNX (static, val-calibrated) | 0.264 | 1.039 | 1.049 | 508.570 | 0 |
+
+  "Process peak RSS" is the whole Python/torch/onnxruntime process's high-water mark (model
+  + runtime already loaded), not a per-inference figure — it is nowhere near a
+  Raspberry-Pi-comparable number and should not be compared against the spec's 25MB budget
+  directly. "Inference-only RSS delta" (0 KB for both variants) reflects that inference adds
+  no *additional* high-water mark beyond process/model load, not that inference itself uses
+  zero memory.
+
+### Known gaps — not validated, stated plainly
+
+- **Slot extraction was never tested on real audio.** The acoustic model saw zero
+  slot-word (numbers/artists/personas) audio during training. Slot extraction correctness
+  is verified only deterministically, via synthetic CTC posteriors built directly from
+  text (`vcm/decoder.py`'s test suite), never real speech. The real-audio slot-eval task
+  (2 personas x 12 slot-bearing phrases via TTS) was cleanly dropped — no persona
+  reference audio exists on this checkout — but this is a ready-to-run gap, not an
+  abandoned one: the resample/manifest/non-silence-check logic is built and unit-tested; it
+  only needs real reference wavs to actually run (`python -m
+  me2_voicegen.vcm.slot_eval_set --manifest personas.json`).
+- **No Raspberry Pi hardware exists on this node.** Every latency/memory number above is a
+  same-architecture-class estimate on a very different (256-thread server) CPU, not a real
+  on-device measurement.
+- **`$CMD_TEMPERATURE` has no up/down direction in the BNF** — a genuine gap in the
+  original spec text (see Architecture above), not a decoder bug. Resolving it (if it
+  matters for a scale-up pass) needs a spec change.
+- **This is training-audio-memorization-scale data**: ~45 minutes total audio, 20 fixed
+  command phrases. None of the numbers above are evidence the approach generalizes to more
+  or real data — that is exactly what a scale-up pass would need to test.
+
+### License
+
+Any checkpoint trained on this data — and its ONNX/INT8 exports and any derivative —
+inherits **CC-BY-NC-SA-4.0** (NonCommercial + ShareAlike), via `background_noise/`'s ESC-50
+license, the same restriction that already governs `test_set/` itself. This note is carried
+in the checkpoint/loss-history metadata and in every generated report's header.
+
+### Dependency note
+
+`onnx==1.16.1` (Apache-2.0) was added for ONNX export/quantization (`vcm.export_onnx`) — see
+the "Trimmed dependencies" table above, which records this as a deliberate, documented
+reversal of that table's earlier CosyVoice-spike exclusion, not an oversight.
+
+## Option B spoken-command grammar
+
+A second, independent context-free grammar — spec plus implementation — for the AI231
+`MEX2/OptionB` spoken-command dataset (19 intents: 13 fixed-phrase x 3 phrasings, 6 slotted x 3
+templates x 3 slot values). It lives in `src/me2_voicegen/optionb/` and reuses the same
+combinator/trie grammar machinery as `vcm` (factored out into `grammar_core.py` for that
+purpose) but is otherwise unrelated to `vcm`. The full technical contract (rules, slot
+vocabularies, normalization, the canonical-93-vs-accepted-129 arithmetic, and the vocabulary
+census) lives in [`docs/OPTIONB-GRAMMAR-CONTRACT.md`](docs/OPTIONB-GRAMMAR-CONTRACT.md).
+
+**This is not the same taxonomy as `vcm`'s 20-intent grammar (`docs/VCM-CONTRACT.md`), and the
+two are never interchangeable.** Notably: Option B has no `DIM_UP`/`DIM_DOWN` or
+`TEMP_UP`/`TEMP_DOWN` split — `BRIGHTNESS` and `TEMPERATURE` are each a single intent
+parameterized by a slot value, not directional pairs; Option B's `COLOR` intent has no VCM
+counterpart at all; and Option B's reminder-creation intent is named `CREATE_REMINDER` where
+VCM's equivalent is named `SET_REMINDER`. Do not attempt to map one taxonomy onto the other or
+reuse `vcm` decoder/model code against `OPTIONB_GRAMMAR`, or vice versa — see
+`OPTIONB-GRAMMAR-CONTRACT.md` section 5 for the full divergence list.
