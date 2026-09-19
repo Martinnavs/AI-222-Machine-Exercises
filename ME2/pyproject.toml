@@ -18,6 +18,7 @@ dependencies = [
   "networkx==3.1",
   "numpy==1.26.4",
   "openai-whisper==20231117",
+  "onnx==1.16.1",
   "onnxruntime==1.18.0",
   "protobuf==4.25",
   "pyarrow==18.1.0",

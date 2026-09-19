@@ -14,7 +14,21 @@ REFS_DIR ?= $(HOME)/cosy-voice-data/References
 RESYNTH_PROB ?= 0.3
 SEED ?=
 
-.PHONY: sync vendor download-model generate generate-personas generate-conversions test clean
+VCM_MANIFEST ?= out/conversions/v2/test_set/manifest.csv
+VCM_OUT_DIR ?= out/vcm
+VCM_PRESET ?= default
+VCM_DEVICE ?= cpu
+VCM_MAX_MINUTES ?= 30
+VCM_SEED ?= 0
+
+VCM_CHECKPOINT ?= $(VCM_OUT_DIR)/checkpoint.pt
+VCM_BENCH_CALIBRATION_SAMPLES ?= 32
+VCM_BENCH_N_ITERS ?= 100
+
+VCM_EVAL_BEAM_WIDTH ?= 50
+VCM_SLOT_EVAL_MANIFEST ?= $(VCM_OUT_DIR)/slot_eval/manifest.csv
+
+.PHONY: sync vendor download-model generate generate-personas generate-conversions test clean vcm-train vcm-bench vcm-eval
 
 sync:
 	$(UV) sync
@@ -40,6 +54,15 @@ generate-personas:
 
 generate-conversions:
 	$(UV) run python -m me2_voicegen.generate_conversions --raw-dir "$(RAW_DIR)" --refs-dir "$(REFS_DIR)" --backend $(BACKEND) --resynth-prob $(RESYNTH_PROB) $(if $(SEED),--seed $(SEED))
+
+vcm-train:
+	$(UV) run python -m me2_voicegen.vcm.train --manifest "$(VCM_MANIFEST)" --out-dir "$(VCM_OUT_DIR)" --preset $(VCM_PRESET) --device $(VCM_DEVICE) --max-minutes $(VCM_MAX_MINUTES) --seed $(VCM_SEED)
+
+vcm-bench:
+	$(UV) run python -m me2_voicegen.vcm.benchmark --checkpoint "$(VCM_CHECKPOINT)" --out-dir "$(VCM_OUT_DIR)" --manifest "$(VCM_MANIFEST)" --calibration-samples $(VCM_BENCH_CALIBRATION_SAMPLES) --n-iters $(VCM_BENCH_N_ITERS)
+
+vcm-eval:
+	$(UV) run python -m me2_voicegen.vcm.evaluate --manifest "$(VCM_MANIFEST)" --checkpoint "$(VCM_CHECKPOINT)" --out-dir "$(VCM_OUT_DIR)" --device $(VCM_DEVICE) --beam-width $(VCM_EVAL_BEAM_WIDTH) --slot-eval-manifest "$(VCM_SLOT_EVAL_MANIFEST)"
 
 test:
 	$(UV) run pytest
