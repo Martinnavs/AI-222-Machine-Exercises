@@ -32,7 +32,12 @@ VCM_GRAMMAR ?= spec,toy
 OPTIONB_MANIFEST ?= out/conversions/v2/optionb/manifest.csv
 OPTIONB_OUT_DIR ?= out/vcm/optionb
 
-.PHONY: sync vendor download-model generate generate-personas generate-conversions test clean vcm-train vcm-bench vcm-eval optionb-train optionb-eval
+STREAM_MODEL ?= optionc
+STREAM_BACKEND ?= onnx
+STREAM_SOURCE ?= mic
+STREAM_ARGS ?=
+
+.PHONY: sync vendor download-model generate generate-personas generate-conversions test clean vcm-train vcm-bench vcm-eval optionb-train optionb-eval stream
 
 sync:
 	$(UV) sync
@@ -80,6 +85,14 @@ optionb-train:
 
 optionb-eval:
 	$(UV) run python -m me2_voicegen.vcm.evaluate --manifest "$(OPTIONB_MANIFEST)" --checkpoint "$(OPTIONB_OUT_DIR)/checkpoints/checkpoint.pt" --out-dir "$(OPTIONB_OUT_DIR)" --device $(VCM_DEVICE) --beam-width $(VCM_EVAL_BEAM_WIDTH) --slot-eval-manifest "$(OPTIONB_OUT_DIR)/metadata/slot_eval/manifest.csv" --grammar optionb
+
+# Streaming spoken-command runner (ticket 04 of feature optionb-streaming).
+# STREAM_SOURCE defaults to the live microphone; override with a wav path
+# (STREAM_SOURCE=path/to/clip.wav) for deterministic file-replay runs.
+# STREAM_ARGS carries any extra flags (e.g. STREAM_ARGS="--listen-for 10
+# --log-all-windows") straight through to the CLI.
+stream:
+	$(UV) run python -m me2_voicegen.vcm.streaming --model $(STREAM_MODEL) --backend $(STREAM_BACKEND) --source "$(STREAM_SOURCE)" $(STREAM_ARGS)
 
 test:
 	$(UV) run pytest

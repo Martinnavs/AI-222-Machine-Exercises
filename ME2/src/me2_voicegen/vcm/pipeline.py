@@ -35,6 +35,7 @@ from me2_voicegen.common.features import SAMPLE_RATE, LogMelFeatureExtractor
 from me2_voicegen.common.grammar_core import Grammar
 from me2_voicegen.vcm.decoder import DecodeResult, decode
 from me2_voicegen.vcm.model import MatchboxNetConfig, MatchboxNetCTC
+from me2_voicegen.vcm.streaming.debounce import Debouncer
 
 WINDOW_S = 1.5
 STRIDE_S = 0.1
@@ -45,13 +46,68 @@ STRIDE_SAMPLES = int(round(STRIDE_S * SAMPLE_RATE))
 
 
 def load_checkpoint(
-    path: str | Path, device: str | torch.device = "cpu"
+    path: str | Path,
+    device: str | torch.device = "cpu",
+    weights_only: bool = False,
+    allow_unsafe_load: bool = False,
 ) -> tuple[MatchboxNetCTC, dict]:
     """Load a `vcm.train`-written checkpoint. Returns `(model, checkpoint)`
     -- `model` is in `eval()` mode on `device`; `checkpoint` is the raw
     dict (carries `license`, `preset`, `val_loss`, `epoch`, etc. for report
-    headers)."""
-    checkpoint = torch.load(path, map_location=device)
+    headers).
+
+    `weights_only` defaults to `False`, preserving today's exact behavior
+    for existing callers (`evaluate.py`, `benchmark.py`, `export_onnx.py`).
+    Opt in with `weights_only=True` (as `vcm.streaming.backends.TorchBackend`
+    does) to mitigate `torch.load`'s pickle-deserialization trust boundary on
+    an untrusted/arbitrary `--model` path. `weights_only=True` is a
+    mitigation, not a guarantee: it is a known-vulnerable configuration on
+    this project's pinned `torch==2.3.1` (CVE-2025-32434 affects
+    `weights_only=True` on torch <= 2.5.1; fixed in 2.6.0). Upgrading torch
+    is explicitly out of scope here (a repo-wide pinned CUDA stack) and is
+    tracked as a separate backlog item, not addressed by this function.
+
+    A checkpoint that fails to load under `weights_only=True` is exactly
+    the attack signature `weights_only=True` exists to catch, not merely an
+    edge case -- so this does NOT automatically fall back to the unsafe
+    `weights_only=False` path. It only does so if the caller also passes
+    `allow_unsafe_load=True`, an explicit second opt-in on top of
+    `weights_only=True` meaning "I trust this specific checkpoint enough to
+    accept full pickle deserialization if the safe path rejects it."
+    Without it, a `weights_only=True` failure is raised as an actionable
+    `RuntimeError` naming the escape hatch, not silently downgraded.
+    `vcm.streaming.backends.TorchBackend` calls with
+    `allow_unsafe_load=False` (the default) -- a checkpoint failing
+    `weights_only=True` there is a hard error, not a silent unsafe retry.
+    See `docs/STREAMING-CONTRACT.md`."""
+    if weights_only:
+        try:
+            checkpoint = torch.load(path, map_location=device, weights_only=True)
+        except Exception as exc:
+            import sys
+
+            if not allow_unsafe_load:
+                raise RuntimeError(
+                    f"torch.load(..., weights_only=True) failed on {path} "
+                    f"({exc!r}). This is refused rather than silently retried "
+                    f"with weights_only=False, since a checkpoint failing the "
+                    f"weights_only allow-list is the attack signature that "
+                    f"mitigation exists to catch. If you produced this "
+                    f"checkpoint yourself or otherwise trust it, re-call with "
+                    f"allow_unsafe_load=True to explicitly accept full pickle "
+                    f"deserialization."
+                ) from exc
+
+            print(
+                f"warning: torch.load(..., weights_only=True) failed on {path} "
+                f"({exc!r}); falling back to weights_only=False because "
+                f"allow_unsafe_load=True was explicitly passed. Only load "
+                f"checkpoints you produced yourself or otherwise trust.",
+                file=sys.stderr,
+            )
+            checkpoint = torch.load(path, map_location=device)
+    else:
+        checkpoint = torch.load(path, map_location=device)
     config = MatchboxNetConfig(**checkpoint["config"])
     model = MatchboxNetCTC(config)
     model.load_state_dict(checkpoint["model_state_dict"])
@@ -139,18 +195,24 @@ class SlidingWindowPipeline:
 
         self._buffer = torch.zeros(0)
         self._samples_since_last_window = 0
-        self._cooldown_samples_remaining = 0
+        self._debouncer = Debouncer(self.refractory_samples)
         self._window_index = 0
         self._samples_seen = 0
-        self.suppressed_count = 0
+
+    @property
+    def suppressed_count(self) -> int:
+        return self._debouncer.suppressed_count
+
+    @property
+    def _cooldown_samples_remaining(self) -> int:
+        return self._debouncer.cooldown_samples_remaining
 
     def reset(self) -> None:
         self._buffer = torch.zeros(0)
         self._samples_since_last_window = 0
-        self._cooldown_samples_remaining = 0
+        self._debouncer.reset()
         self._window_index = 0
         self._samples_seen = 0
-        self.suppressed_count = 0
 
     def feed(self, chunk: torch.Tensor) -> list[TriggerEvent]:
         """Append `chunk` (1-D waveform tensor, any length > 0) to the ring
@@ -172,11 +234,7 @@ class SlidingWindowPipeline:
         while self._samples_since_last_window >= self.stride_samples:
             self._samples_since_last_window -= self.stride_samples
             self._window_index += 1
-
-            if self._cooldown_samples_remaining > 0:
-                self._cooldown_samples_remaining = max(
-                    0, self._cooldown_samples_remaining - self.stride_samples
-                )
+            self._debouncer.tick(self.stride_samples)
 
             result = infer_waveform(
                 self.model,
@@ -188,17 +246,13 @@ class SlidingWindowPipeline:
                 device=self.device,
             )
 
-            if not result.no_match:
-                if self._cooldown_samples_remaining <= 0:
-                    events.append(
-                        TriggerEvent(
-                            window_index=self._window_index,
-                            samples_seen=self._samples_seen,
-                            result=result,
-                        )
+            if self._debouncer.gate(not result.no_match):
+                events.append(
+                    TriggerEvent(
+                        window_index=self._window_index,
+                        samples_seen=self._samples_seen,
+                        result=result,
                     )
-                    self._cooldown_samples_remaining = self.refractory_samples
-                else:
-                    self.suppressed_count += 1
+                )
 
         return events

@@ -93,6 +93,14 @@ _VCM_MODULES = [
     "me2_voicegen.vcm.export_onnx",
     "me2_voicegen.vcm.benchmark",
     "me2_voicegen.vcm.slot_eval_set",
+    "me2_voicegen.vcm.streaming.buffer",
+    "me2_voicegen.vcm.streaming.debounce",
+    "me2_voicegen.vcm.streaming.policy",
+    "me2_voicegen.vcm.streaming.sources",
+    "me2_voicegen.vcm.streaming.config",
+    "me2_voicegen.vcm.streaming.backends",
+    "me2_voicegen.vcm.streaming.runner",
+    "me2_voicegen.vcm.streaming.__main__",
 ]
 
 # Option B grammar feature (ticket 02): pure-stdlib string-matching modules

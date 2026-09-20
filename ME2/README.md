@@ -538,7 +538,7 @@ reversal of that table's earlier CosyVoice-spike exclusion, not an oversight.
 
 A second, independent context-free grammar — spec plus implementation — for the AI231
 `MEX2/OptionB` spoken-command dataset (19 intents: 13 fixed-phrase x 3 phrasings, 6 slotted x 3
-templates x 3 slot values). It lives in `src/me2_voicegen/optionb/` and reuses the same
+templates x 3 slot values). It lives in `src/me2_voicegen/vcm/optionb/` and reuses the same
 combinator/trie grammar machinery as `vcm` (factored out into `grammar_core.py` for that
 purpose) but is otherwise unrelated to `vcm`. The full technical contract (rules, slot
 vocabularies, normalization, the canonical-93-vs-accepted-129 arithmetic, and the vocabulary
@@ -552,3 +552,123 @@ counterpart at all; and Option B's reminder-creation intent is named `CREATE_REM
 VCM's equivalent is named `SET_REMINDER`. Do not attempt to map one taxonomy onto the other or
 reuse `vcm` decoder/model code against `OPTIONB_GRAMMAR`, or vice versa — see
 `OPTIONB-GRAMMAR-CONTRACT.md` section 5 for the full divergence list.
+
+## Streaming inference
+
+A live, continuous spoken-command runner — `me2_voicegen.vcm.streaming` — that consumes a
+trained VCM checkpoint and the `OPTIONB_GRAMMAR` decoder (above) against a rolling window of
+audio instead of one pre-cut clip at a time, emitting detected `(intent, slots)` events as
+JSONL as they happen. The full technical contract (interfaces, pipeline order, JSONL schema,
+config precedence, trust boundaries) lives in
+[`docs/STREAMING-CONTRACT.md`](docs/STREAMING-CONTRACT.md); this section covers what it does,
+how to run it, and the risks/limitations stated plainly.
+
+### Running it
+
+```bash
+make stream                                    # live mic, optionc preset, ONNX fp32
+make stream STREAM_SOURCE=path/to/clip.wav     # deterministic file replay instead
+```
+
+or directly:
+
+```bash
+uv run python -m me2_voicegen.vcm.streaming
+uv run python -m me2_voicegen.vcm.streaming --source path/to/clip.wav
+```
+
+With no arguments, it opens the live microphone, loads the `optionc` checkpoint preset (the
+`MODEL_REGISTRY` entry that beats the `default` preset on every eval metric — see the
+"VCM toy" section above), and runs inference through the ONNX fp32 backend. It runs
+continuously, printing one JSONL object per detected, non-suppressed command on stdout and a
+startup banner (checkpoint/run dir, preset, backend, grammar, window/stride/refractory/beam,
+resolved threshold, license) on stderr, until source EOF (file replay), `Ctrl-C`, or
+`--listen-for <seconds>` expires — all three exit 0 with a summary line
+(`windows`/`events`/`suppressed`/`dropped`).
+
+### Mic-primary design and prerequisites
+
+The live microphone is the primary, default input path; `--source <wav>` (deterministic file
+replay, no drops, byte-for-byte identical events across runs) is the secondary path used for
+testing and reproducible demos. Live capture works by spawning `arecord` (part of
+`alsa-utils`, present on essentially every Linux distro) as a subprocess and reading raw PCM
+from its stdout — it needs `arecord` on `PATH` and an actual capture device. If the mic can't
+be opened, the run exits with a clear, actionable message (never a traceback) naming the two
+fallbacks: `--source <wav>` to replay a file instead, or `--mic-command` to point at a working
+capture command of your own. `--mic-command` also lets an operator swap in `parec`/`ffmpeg`/a
+different ALSA device string without touching code.
+
+### Backend: ONNX by default, torch as an explicit fallback
+
+`--backend onnx|torch` (default `onnx`) selects the inference backend; `--onnx-variant
+fp32|int8` (default `fp32`) selects the ONNX export variant. **fp32 is the default, not int8,
+because the shipped `-0.1` operating threshold was tuned on torch-fp32 logits** (the same
+threshold `vcm.evaluate`'s val-split sweep chose) — the int8 export would need its own
+re-tuning pass against that quantized model's own confidence distribution before it could
+safely reuse the same threshold. The two backends are verified numerically close (ONNX vs.
+torch logits within 1e-2 max-abs-diff on the checked-in `optionc` artifacts) and produce the
+same intent/slots on the same wav.
+
+### Known risk: confidence is sensitive to window padding
+
+Stated plainly, in the same spirit as the "Known gaps" section above: **a correctly-decoded
+phrase can still be rejected purely because of how much silence padding surrounds it in the
+fixed-length window**, even from a moderately (not maximally) confident model. Confidence is
+`beam_total / T` — a mean per-frame log-probability over the *entire* fixed-length window — so
+non-speech padding frames dilute it. Measured directly (holding the utterance constant, varying
+only the model's blank-confidence margin during non-speech padding of a 2.5s window):
+
+| blank-confidence margin | resulting confidence | accepted at -0.1? |
+|---|---|---|
+| 12.0 | -0.0002 | yes |
+| 6.0 | -0.0436 | yes |
+| 3.0 | -0.5670 | **no** |
+| 1.5 | -1.2863 | **no** |
+
+This is a real, live phenomenon, not just a synthetic measurement: a manual smoke test run
+directly on this node's real microphone (ambient room noise, no one speaking) produced two
+spurious `TIME` intent triggers at confidence -0.085 and -0.09 — both just inside the -0.1
+threshold. Because every window is decoded once at the most permissive threshold and the
+accept/reject decision is applied afterward (see the contract's fixed pipeline order), two
+mitigations are built in rather than bolted on: `--threshold <value>` overrides the resolved
+threshold outright, and `--log-all-windows` emits every evaluated window's real confidence (not
+just accepted triggers) as a JSONL `"window"` record, so an operator can empirically re-tune
+`--threshold` for a specific room/mic rather than trust the eval-set-chosen default blind.
+
+### Security notes
+
+- **`--model`/`--config` and `--mic-command` are operator-supplied trust boundaries, not
+  sandboxed inputs.** The resolved model path is fed to either `torch.load` (pickle
+  deserialization) or ONNX Runtime's model parser — neither is safe against an untrusted file.
+  `--mic-command` is spawned as an argv list (`shell=False`, no shell injection surface) but
+  still executes whatever command you name. Only point either at artifacts/commands you
+  produced or otherwise trust.
+- **`weights_only=True` is a mitigation, not a guarantee.** Torch checkpoint loading defaults
+  to `weights_only=True`, but this project's pinned `torch==2.3.1` is within the affected range
+  of **CVE-2025-32434**, a known bypass of `weights_only=True` (fixed in torch 2.6.0).
+  Upgrading torch is a deliberately separate, larger, backlogged concern — a repo-wide pinned
+  CUDA stack — not something this feature attempted.
+- **A `--config <file>.json` is exactly as trusted as CLI flags.** It can set `model` or
+  `mic_command` just as freely as the equivalent command-line flag can (field names and
+  per-field types/choices are validated, but the *values* are not judged for safety). Never
+  treat a `--config` file as inert data safe to copy from an untrusted source.
+
+### Known limitations, stated plainly
+
+- **No real Raspberry Pi hardware exists on this node** (same caveat as the VCM-toy section
+  above), so no on-device latency numbers exist for this feature either. The measured latency
+  numbers that validated the shipped real-time budget (`window_s=2.5`, `stride_s=0.25`,
+  `beam_width=25`) are this-node estimates on an AMD EPYC CPU, not RPi numbers: beam search over
+  a real 2.5s window decoded in ~83.6ms — **beam search is ~97% of per-window compute; the ONNX
+  forward pass itself is only ~2.8ms** and is not what makes this real-time.
+- **The live-mic path was verified end-to-end on this specific node**: a manual smoke test
+  correctly opened the microphone, ran real ONNX inference against live audio, and exited
+  cleanly on `--listen-for` expiry with a correct summary line. Mic/device availability will
+  vary on other machines — hence `MicrophoneUnavailableError`'s actionable fallback message
+  naming `--source <wav>` and `--mic-command` rather than a bare traceback.
+
+### License
+
+Same as the VCM-toy checkpoint above: any checkpoint used here inherits **CC-BY-NC-SA-4.0**
+(NonCommercial + ShareAlike) via `background_noise/`'s ESC-50 license. The streaming CLI's
+startup banner echoes this license string on every run.

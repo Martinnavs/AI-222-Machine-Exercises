@@ -230,3 +230,105 @@ def test_load_checkpoint_real_artifact_if_present():
     fe = LogMelFeatureExtractor()
     result = infer_waveform(model, fe, waveform, TOY_GRAMMAR, threshold=-1e6)
     assert result.text is not None
+
+
+# ---------------------------------------------------------------------------
+# load_checkpoint: weights_only / allow_unsafe_load fallback behavior
+# (SEC-2). `torch.load` is monkeypatched -- no real checkpoint needed, and
+# no real malicious pickle is ever constructed; "failure" is simulated.
+# ---------------------------------------------------------------------------
+
+
+def _fake_checkpoint_dict():
+    from me2_voicegen.vcm.model import MatchboxNetConfig, MatchboxNetCTC
+
+    config = MatchboxNetConfig(
+        n_mels=40, n_blocks=1, channels=8, kernel_sizes=[5], prologue_channels=8, epilogue_channels=8
+    )
+    model = MatchboxNetCTC(config)
+    return {
+        "model_state_dict": model.state_dict(),
+        "config": {
+            "n_mels": config.n_mels,
+            "n_blocks": config.n_blocks,
+            "channels": config.channels,
+            "kernel_sizes": config.kernel_sizes,
+            "prologue_channels": config.prologue_channels,
+            "epilogue_channels": config.epilogue_channels,
+            "alphabet_size": config.alphabet_size,
+        },
+        "preset": "test-fixture",
+    }
+
+
+def test_load_checkpoint_default_call_never_requests_weights_only(monkeypatch):
+    import me2_voicegen.vcm.pipeline as pipeline_module
+
+    calls = []
+
+    def fake_torch_load(path, map_location=None, **kwargs):
+        calls.append(kwargs)
+        return _fake_checkpoint_dict()
+
+    monkeypatch.setattr(pipeline_module.torch, "load", fake_torch_load)
+    pipeline_module.load_checkpoint("fake/path.pt")
+    # Existing callers (evaluate.py/benchmark.py/export_onnx.py) never pass
+    # weights_only=True, so this call shape (no weights_only kwarg at all)
+    # must remain exactly what they get.
+    assert calls == [{}]
+
+
+def test_load_checkpoint_weights_only_failure_raises_without_allow_unsafe_load(monkeypatch):
+    import me2_voicegen.vcm.pipeline as pipeline_module
+
+    def fake_torch_load(path, map_location=None, weights_only=False):
+        if weights_only:
+            raise RuntimeError("simulated weights_only allow-list rejection")
+        return _fake_checkpoint_dict()
+
+    monkeypatch.setattr(pipeline_module.torch, "load", fake_torch_load)
+    with pytest.raises(RuntimeError, match="allow_unsafe_load"):
+        pipeline_module.load_checkpoint("fake/path.pt", weights_only=True)
+
+
+def test_load_checkpoint_weights_only_failure_never_silently_falls_back_by_default(monkeypatch):
+    """The core SEC-2 requirement: no automatic, silent retry with
+    weights_only=False when the safe path fails and the caller didn't
+    explicitly opt into allow_unsafe_load."""
+    import me2_voicegen.vcm.pipeline as pipeline_module
+
+    unsafe_load_calls = []
+
+    def fake_torch_load(path, map_location=None, weights_only=False):
+        if weights_only:
+            raise RuntimeError("simulated weights_only allow-list rejection")
+        unsafe_load_calls.append(1)
+        return _fake_checkpoint_dict()
+
+    monkeypatch.setattr(pipeline_module.torch, "load", fake_torch_load)
+    with pytest.raises(RuntimeError):
+        pipeline_module.load_checkpoint(
+            "fake/path.pt", weights_only=True, allow_unsafe_load=False
+        )
+    assert unsafe_load_calls == []
+
+
+def test_load_checkpoint_weights_only_failure_falls_back_with_explicit_allow_unsafe_load(
+    monkeypatch, capsys
+):
+    import me2_voicegen.vcm.pipeline as pipeline_module
+
+    def fake_torch_load(path, map_location=None, weights_only=False):
+        if weights_only:
+            raise RuntimeError("simulated weights_only allow-list rejection")
+        return _fake_checkpoint_dict()
+
+    monkeypatch.setattr(pipeline_module.torch, "load", fake_torch_load)
+    model, checkpoint = pipeline_module.load_checkpoint(
+        "fake/path.pt", weights_only=True, allow_unsafe_load=True
+    )
+    assert checkpoint["preset"] == "test-fixture"
+    assert model.training is False
+    captured = capsys.readouterr()
+    assert "warning" in captured.err.lower()
+    assert "allow_unsafe_load" in captured.err
