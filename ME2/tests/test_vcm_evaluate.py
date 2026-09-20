@@ -29,9 +29,12 @@ from me2_voicegen.vcm.evaluate import (
     false_accept_stats,
     main,
     render_markdown,
+    slot_accuracy_breakdown,
+    speaker_group_breakdown,
     sweep_thresholds,
 )
 from me2_voicegen.vcm.optiona.grammar import TOY_GRAMMAR
+from me2_voicegen.vcm.optionb.grammar import OPTIONB_GRAMMAR
 
 CALL_IDS = alphabet.encode("call")
 
@@ -69,8 +72,18 @@ def test_intent_labels_for_optionb_uses_optionb_grammars_own_intents():
 # ---------------------------------------------------------------------------
 
 
-def _row(bucket, label, intent, confidence):
-    return RowResult(index=0, bucket=bucket, label=label, text="", intent=intent, confidence=confidence)
+def _row(bucket, label, intent, confidence, group_id=None, source_dataset=None, index=0, slots=None):
+    return RowResult(
+        index=index,
+        bucket=bucket,
+        label=label,
+        text="",
+        intent=intent,
+        confidence=confidence,
+        group_id=group_id,
+        source_dataset=source_dataset,
+        slots={} if slots is None else slots,
+    )
 
 
 def test_sweep_thresholds_computes_target_and_false_accept_rates():
@@ -163,6 +176,196 @@ def test_false_accept_stats_counts_accepts_at_threshold():
 
 
 # ---------------------------------------------------------------------------
+# classify_speaker_group / speaker_group_breakdown / _wilson_interval
+# ---------------------------------------------------------------------------
+
+
+def test_classify_speaker_group_filipino_id():
+    from me2_voicegen.vcm.evaluate import classify_speaker_group
+
+    assert classify_speaker_group("optionb", "s100") == "filipino_reference"
+    assert classify_speaker_group("optionb", "s68") == "filipino_reference"
+    assert classify_speaker_group("optionb", "s80") == "filipino_reference"
+    assert classify_speaker_group("optionb", "s89") == "filipino_reference"
+    assert classify_speaker_group("optionb", "s90") == "filipino_reference"
+
+
+def test_classify_speaker_group_foreign_id():
+    from me2_voicegen.vcm.evaluate import classify_speaker_group
+
+    assert classify_speaker_group("optionb", "s1") == "foreign_reference"
+    assert classify_speaker_group("optionb", "s67") == "foreign_reference"
+    assert classify_speaker_group("optionb", "s81") == "foreign_reference"
+
+
+def test_classify_speaker_group_non_optionb_source_is_none():
+    from me2_voicegen.vcm.evaluate import classify_speaker_group
+
+    assert classify_speaker_group("background_noise", "s100") is None
+    assert classify_speaker_group("youtube_institutional", "abc123") is None
+    assert classify_speaker_group("filipino_speech_corpus", "007") is None
+    assert classify_speaker_group("common_voice_negative", "") is None
+
+
+def test_classify_speaker_group_malformed_or_empty_group_id_is_none():
+    from me2_voicegen.vcm.evaluate import classify_speaker_group
+
+    assert classify_speaker_group("optionb", None) is None
+    assert classify_speaker_group("optionb", "") is None
+    assert classify_speaker_group("optionb", "not_a_speaker_id") is None
+    assert classify_speaker_group("optionb", "sXY") is None
+
+
+def test_wilson_interval_brackets_point_estimate():
+    from me2_voicegen.vcm.evaluate import _wilson_interval
+
+    interval = _wilson_interval(90, 100)
+    assert interval is not None
+    lower, upper = interval
+    assert lower < 0.9 < upper
+
+
+def test_wilson_interval_zero_n_is_none():
+    from me2_voicegen.vcm.evaluate import _wilson_interval
+
+    assert _wilson_interval(0, 0) is None
+
+
+def test_speaker_group_breakdown_counts_and_rates():
+    results = [
+        _row("target_commands", "CALL", "CALL", -0.1, group_id="s100", source_dataset="optionb"),
+        _row("target_commands", "CALL", "STOP", -0.1, group_id="s100", source_dataset="optionb"),
+        _row("target_commands", "CALL", "CALL", -0.1, group_id="s1", source_dataset="optionb"),
+        _row("target_commands", "CALL", "CALL", -0.1, group_id="s2", source_dataset="optionb"),
+        _row("target_commands", "CALL", "CALL", -0.1, group_id="s3", source_dataset="optionb"),
+    ]
+    breakdown = speaker_group_breakdown(results, threshold=-0.5)
+    assert breakdown is not None
+    assert breakdown["filipino_reference"]["n"] == 2
+    assert breakdown["filipino_reference"]["n_accepted"] == 2
+    assert breakdown["filipino_reference"]["n_exact_correct"] == 1
+    assert breakdown["filipino_reference"]["exact_accuracy"] == pytest.approx(0.5)
+    assert breakdown["foreign_reference"]["n"] == 3
+    assert breakdown["foreign_reference"]["exact_accuracy"] == pytest.approx(1.0)
+    assert breakdown["n_unclassified"] == 0
+    assert breakdown["exact_accuracy_gap_foreign_minus_filipino"] == pytest.approx(0.5)
+
+
+def test_speaker_group_breakdown_none_when_no_optionb_target_rows():
+    results = [
+        _row("target_commands", "CALL", "CALL", -0.1, group_id="0", source_dataset="sanitized_clean"),
+        _row("babble", "n/a", "CALL", -0.1, group_id="0", source_dataset="common_voice_negative"),
+    ]
+    assert speaker_group_breakdown(results, threshold=-0.5) is None
+
+
+def test_speaker_group_breakdown_counts_unclassifiable_row():
+    results = [
+        _row("target_commands", "CALL", "CALL", -0.1, group_id="s100", source_dataset="optionb"),
+        _row("target_commands", "CALL", "CALL", -0.1, group_id="bogus", source_dataset="optionb"),
+    ]
+    breakdown = speaker_group_breakdown(results, threshold=-0.5)
+    assert breakdown is not None
+    assert breakdown["n_unclassified"] == 1
+    assert breakdown["filipino_reference"]["n"] == 1
+    assert breakdown["foreign_reference"]["n"] == 0
+    assert breakdown["foreign_reference"]["exact_accuracy"] is None
+    assert breakdown["foreign_reference"]["exact_accuracy_ci95"] is None
+
+
+def test_speaker_group_breakdown_excludes_non_target_buckets():
+    results = [
+        _row("target_commands", "CALL", "CALL", -0.1, group_id="s100", source_dataset="optionb"),
+        _row("babble", "n/a", "CALL", -0.1, group_id="s1", source_dataset="optionb"),
+        _row("silence", "n/a", None, None, group_id="s2", source_dataset="optionb"),
+    ]
+    breakdown = speaker_group_breakdown(results, threshold=-0.5)
+    assert breakdown is not None
+    assert breakdown["filipino_reference"]["n"] == 1
+    assert breakdown["foreign_reference"]["n"] == 0
+
+
+# ---------------------------------------------------------------------------
+# _true_slots_for_row / slot_accuracy_breakdown: does the model get the
+# SLOT VALUE right (e.g. which hour an ALARM clip named), not just the
+# intent? `exact_accuracy`/`confusion_counts` only ever compare
+# `intent == label` and cannot answer this.
+# ---------------------------------------------------------------------------
+
+
+def _optionb_row(transcript, label):
+    return {"transcript": transcript, "label": label, "source_dataset": "optionb"}
+
+
+def test_true_slots_for_row_parses_real_transcript():
+    from me2_voicegen.vcm.evaluate import _true_slots_for_row
+
+    row = _optionb_row("Alarm 6 AM", "ALARM")
+    assert _true_slots_for_row(row, OPTIONB_GRAMMAR) == {"ALARM_TIME": "6 AM"}
+
+
+def test_true_slots_for_row_digit_and_word_form_agree():
+    from me2_voicegen.vcm.evaluate import _true_slots_for_row
+
+    digit_form = _true_slots_for_row(_optionb_row("Wake me up at 9 PM", "ALARM"), OPTIONB_GRAMMAR)
+    word_form = _true_slots_for_row(_optionb_row("Wake me up at nine PM", "ALARM"), OPTIONB_GRAMMAR)
+    assert digit_form == word_form == {"ALARM_TIME": "9 PM"}
+
+
+def test_true_slots_for_row_none_when_unparseable():
+    from me2_voicegen.vcm.evaluate import _true_slots_for_row
+
+    row = _optionb_row("this is not a real command at all", "ALARM")
+    assert _true_slots_for_row(row, OPTIONB_GRAMMAR) is None
+
+
+def test_true_slots_for_row_none_when_transcript_matches_a_different_intent():
+    from me2_voicegen.vcm.evaluate import _true_slots_for_row
+
+    # A row whose (mislabeled, for this test) `label` disagrees with what
+    # its own transcript actually parses to -- must not silently return
+    # the wrong intent's slots.
+    row = _optionb_row("lights on", "ALARM")
+    assert _true_slots_for_row(row, OPTIONB_GRAMMAR) is None
+
+
+def test_slot_accuracy_breakdown_scores_intent_correct_but_slot_wrong():
+    raw_rows = [
+        _optionb_row("Alarm 6 AM", "ALARM"),  # index 0: intent+slot both right
+        _optionb_row("Alarm 8 AM", "ALARM"),  # index 1: intent right, slot wrong
+        _optionb_row("Alarm 9 PM", "ALARM"),  # index 2: intent wrong entirely
+    ]
+    results = [
+        _row("target_commands", "ALARM", "ALARM", -0.1, source_dataset="optionb", index=0, slots={"ALARM_TIME": "6 AM"}),
+        _row("target_commands", "ALARM", "ALARM", -0.1, source_dataset="optionb", index=1, slots={"ALARM_TIME": "9 PM"}),
+        _row("target_commands", "ALARM", "STOP", -0.1, source_dataset="optionb", index=2, slots={}),
+    ]
+    breakdown = slot_accuracy_breakdown(results, raw_rows, OPTIONB_GRAMMAR, threshold=-0.5)
+    assert breakdown is not None
+    assert breakdown["n_slot_bearing_target_rows"] == 3
+    assert breakdown["n_unparseable_ground_truth"] == 0
+    assert breakdown["n_intent_correct"] == 2  # index 2's wrong intent excluded
+    assert breakdown["n_intent_and_slots_correct"] == 1  # only index 0
+    assert breakdown["slot_exact_match_rate_given_intent_correct"] == pytest.approx(0.5)
+    assert breakdown["per_slot_name_accuracy"]["ALARM_TIME"] == {"n": 2, "n_correct": 1, "accuracy": pytest.approx(0.5)}
+
+
+def test_slot_accuracy_breakdown_none_when_no_optionb_target_rows():
+    raw_rows = [{"transcript": "set alarm", "label": "ALARM", "source_dataset": "sanitized_clean"}]
+    results = [_row("target_commands", "ALARM", "ALARM", -0.1, source_dataset="sanitized_clean", index=0)]
+    assert slot_accuracy_breakdown(results, raw_rows, OPTIONB_GRAMMAR, threshold=-0.5) is None
+
+
+def test_slot_accuracy_breakdown_none_when_grammar_has_no_slotted_intents():
+    from me2_voicegen.common.grammar_core import compile_grammar, literal, with_intent
+
+    no_slot_grammar = compile_grammar("NO_SLOTS", {"$CMD_STOP": with_intent("STOP", literal("stop"))})
+    raw_rows = [_optionb_row("stop", "STOP")]
+    results = [_row("target_commands", "STOP", "STOP", -0.1, source_dataset="optionb", index=0)]
+    assert slot_accuracy_breakdown(results, raw_rows, no_slot_grammar, threshold=-0.5) is None
+
+
+# ---------------------------------------------------------------------------
 # render_markdown: grammar-coverage framing must actually appear, not just
 # render without crashing.
 # ---------------------------------------------------------------------------
@@ -224,6 +427,90 @@ def test_render_markdown_toy_grammar_section_has_no_coverage_note():
     }
     md = render_markdown(report)
     assert "Grammar-coverage note" not in md
+
+
+def test_render_markdown_speaker_group_breakdown_absent_when_no_key():
+    report = {
+        "license_note": "CC-BY-NC-SA-4.0",
+        "checkpoint_path": "out/vcm/checkpoint.pt",
+        "checkpoint_meta": {"preset": "default", "epoch": 1, "val_loss": 1.0},
+        "manifest_path": "manifest.csv",
+        "device": "cpu",
+        "beam_width": 50,
+        "grammar_sections": [_minimal_grammar_section("TOY_GRAMMAR")],
+        "slot_eval_sections": None,
+        "slot_eval_skipped_reason": None,
+    }
+    md = render_markdown(report)
+    assert "Speaker-group breakdown" not in md
+
+
+def test_render_markdown_speaker_group_breakdown_present_when_key_set():
+    section = _minimal_grammar_section("OPTIONB_GRAMMAR")
+    results = [
+        _row("target_commands", "CALL", "CALL", -0.1, group_id="s100", source_dataset="optionb"),
+        _row("target_commands", "CALL", "CALL", -0.1, group_id="s1", source_dataset="optionb"),
+    ]
+    section["test_split"]["speaker_group_breakdown"] = speaker_group_breakdown(results, threshold=-0.5)
+
+    report = {
+        "license_note": "CC-BY-NC-SA-4.0",
+        "checkpoint_path": "out/vcm/checkpoint.pt",
+        "checkpoint_meta": {"preset": "default", "epoch": 1, "val_loss": 1.0},
+        "manifest_path": "manifest.csv",
+        "device": "cpu",
+        "beam_width": 50,
+        "grammar_sections": [section],
+        "slot_eval_sections": None,
+        "slot_eval_skipped_reason": None,
+    }
+    md = render_markdown(report)
+    assert "### Speaker-group breakdown" in md
+    assert "single held-out speaker (`s100`, 180 clips)" in md
+    assert "13 of the 16 Filipino speakers (2,146 clips)" in md
+    assert "filipino_reference" in md
+    assert "foreign_reference" in md
+
+
+def test_render_markdown_slot_accuracy_absent_when_no_key():
+    report = {
+        "license_note": "CC-BY-NC-SA-4.0",
+        "checkpoint_path": "out/vcm/checkpoint.pt",
+        "checkpoint_meta": {"preset": "default", "epoch": 1, "val_loss": 1.0},
+        "manifest_path": "manifest.csv",
+        "device": "cpu",
+        "beam_width": 50,
+        "grammar_sections": [_minimal_grammar_section("TOY_GRAMMAR")],
+        "slot_eval_sections": None,
+        "slot_eval_skipped_reason": None,
+    }
+    md = render_markdown(report)
+    assert "### Slot accuracy" not in md
+
+
+def test_render_markdown_slot_accuracy_present_when_key_set():
+    section = _minimal_grammar_section("OPTIONB_GRAMMAR")
+    raw_rows = [_optionb_row("Alarm 6 AM", "ALARM")]
+    results = [
+        _row("target_commands", "ALARM", "ALARM", -0.1, source_dataset="optionb", index=0, slots={"ALARM_TIME": "6 AM"}),
+    ]
+    section["test_split"]["slot_accuracy"] = slot_accuracy_breakdown(results, raw_rows, OPTIONB_GRAMMAR, threshold=-0.5)
+
+    report = {
+        "license_note": "CC-BY-NC-SA-4.0",
+        "checkpoint_path": "out/vcm/checkpoint.pt",
+        "checkpoint_meta": {"preset": "default", "epoch": 1, "val_loss": 1.0},
+        "manifest_path": "manifest.csv",
+        "device": "cpu",
+        "beam_width": 50,
+        "grammar_sections": [section],
+        "slot_eval_sections": None,
+        "slot_eval_skipped_reason": None,
+    }
+    md = render_markdown(report)
+    assert "### Slot accuracy" in md
+    assert "ALARM_TIME" in md
+    assert "1/1" in md
 
 
 def test_render_markdown_reports_slot_eval_skip_reason():

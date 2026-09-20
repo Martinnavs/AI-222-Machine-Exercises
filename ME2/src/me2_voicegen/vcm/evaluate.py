@@ -48,6 +48,8 @@ from __future__ import annotations
 import argparse
 import dataclasses
 import json
+import math
+import re
 from collections import Counter, defaultdict
 from pathlib import Path
 
@@ -59,6 +61,8 @@ from me2_voicegen.vcm.dataset import VCMDataset
 from me2_voicegen.vcm.optiona.grammar import SPEC_GRAMMAR, TOY_GRAMMAR
 from me2_voicegen.vcm.optiona.phrases import INTENT_PHRASES
 from me2_voicegen.vcm.optionb.grammar import OPTIONB_GRAMMAR
+from me2_voicegen.vcm.optionb.text import normalize_text as optionb_normalize_text
+from me2_voicegen.vcm.optionb.transcript import prepare_ctc_transcript
 from me2_voicegen.vcm.pipeline import infer_waveform, load_checkpoint
 from me2_voicegen.vcm.train import LICENSE_NOTE
 
@@ -101,6 +105,19 @@ DEFAULT_THRESHOLD_GRID: tuple[float, ...] = (
 TARGET_BUCKET = "target_commands"
 REJECT_PROBE_BUCKETS = ("babble", "silence")
 
+# Filipino reference speakers in the Option B dataset, per
+# docs/raw_requirements/optionb-dataset-readme.md ("Speakers" table, line
+# 44): s68-s80, plus s89, s90, s100 (16 speakers total). Test-split target
+# commands are all `s100` (180 clips); train carries the other 13 IDs
+# (2,146 clips) and val carries s89/s90 (350 clips) -- so this checkpoint
+# is not accent-naive, and the test-split Filipino group is a single
+# held-out speaker, not a held-out accent.
+FILIPINO_REFERENCE_SPEAKER_IDS: frozenset[str] = frozenset(
+    {f"s{n}" for n in range(68, 81)} | {"s89", "s90", "s100"}
+)
+
+_OPTIONB_SPEAKER_ID_RE = re.compile(r"^s\d+$")
+
 # Grammar-selection registry for `--grammar` (default "spec,toy" reproduces
 # the original hardcoded SPEC_GRAMMAR/TOY_GRAMMAR pair bit-for-bit; "optionb"
 # adds OPTIONB_GRAMMAR (D11, .scratch/optionb-dataset/tickets/
@@ -137,6 +154,13 @@ class RowResult:
     confidence: float | None
     """`None` iff no grammar terminal was ever reached (equivalent to
     `-inf`, but JSON-serializable)."""
+    group_id: str | None = None
+    source_dataset: str | None = None
+    slots: dict = dataclasses.field(default_factory=dict)
+    """The decoder's extracted slot values (e.g. `{"AMPM": "am"}` for an
+    ALARM clip) -- empty dict when `no_match` (per `vcm.decoder.decode`),
+    never `None`, so callers can always safely do dict comparisons/lookups
+    without a None-check."""
 
 
 @torch.no_grad()
@@ -176,6 +200,9 @@ def decode_split(
                 text=decoded.text,
                 intent=decoded.intent,
                 confidence=confidence,
+                group_id=row.get("group_id"),
+                source_dataset=row.get("source_dataset"),
+                slots=decoded.slots,
             )
         )
     return results
@@ -248,6 +275,176 @@ def false_accept_stats(results: list[RowResult], threshold: float, bucket: str) 
     return {"n": len(rows), "false_accepts": false_accepts, "rate": false_accepts / len(rows)}
 
 
+def classify_speaker_group(source_dataset: str | None, group_id: str | None) -> str | None:
+    """`filipino_reference` / `foreign_reference` / `None` (unclassified or
+    not applicable). Only `optionb` rows are classified -- the other four
+    `source_dataset` values (`background_noise`, `youtube_institutional`,
+    `filipino_speech_corpus`, `common_voice_negative`) use unrelated
+    `group_id` shapes (ESC-50 filenames, video IDs, zero-padded numerics,
+    empty) that must never be misread as a foreign `s<N>` speaker ID."""
+    if source_dataset != "optionb":
+        return None
+    if not group_id:
+        return None
+    if group_id in FILIPINO_REFERENCE_SPEAKER_IDS:
+        return "filipino_reference"
+    if _OPTIONB_SPEAKER_ID_RE.match(group_id):
+        return "foreign_reference"
+    return None
+
+
+def _wilson_interval(successes: int, n: int, z: float = 1.96) -> tuple[float, float] | None:
+    if n == 0:
+        return None
+    phat = successes / n
+    denom = 1 + z * z / n
+    center = phat + z * z / (2 * n)
+    margin = z * math.sqrt(phat * (1 - phat) / n + z * z / (4 * n * n))
+    lower = (center - margin) / denom
+    upper = (center + margin) / denom
+    return (max(0.0, lower), min(1.0, upper))
+
+
+def speaker_group_breakdown(results: list[RowResult], threshold: float) -> dict | None:
+    """Filipino-reference vs. foreign-reference exact-accuracy comparison on
+    `TARGET_BUCKET` rows only, mirroring `false_accept_stats`/
+    `confusion_counts`'s shape. `None` when no classifiable Option B target
+    row exists at all (e.g. a `spec`/`toy` run against the vcm-toy
+    manifest, which has no `optionb` rows)."""
+    target_rows = [r for r in results if r.bucket == TARGET_BUCKET]
+    groups: dict[str, list[RowResult]] = {"filipino_reference": [], "foreign_reference": []}
+    n_unclassified = 0
+    for r in target_rows:
+        group = classify_speaker_group(r.source_dataset, r.group_id)
+        if group is None:
+            n_unclassified += 1
+            continue
+        groups[group].append(r)
+
+    if not groups["filipino_reference"] and not groups["foreign_reference"]:
+        return None
+
+    per_group: dict[str, dict] = {}
+    for group_name, rows in groups.items():
+        n = len(rows)
+        n_accepted = sum(1 for r in rows if _accepted(r, threshold))
+        n_exact_correct = sum(1 for r in rows if _accepted(r, threshold) and r.intent == r.label)
+        per_group[group_name] = {
+            "n": n,
+            "n_accepted": n_accepted,
+            "n_exact_correct": n_exact_correct,
+            "accept_rate": n_accepted / n if n else None,
+            "exact_accuracy": n_exact_correct / n if n else None,
+            "exact_accuracy_ci95": _wilson_interval(n_exact_correct, n),
+        }
+
+    filipino_acc = per_group["filipino_reference"]["exact_accuracy"]
+    foreign_acc = per_group["foreign_reference"]["exact_accuracy"]
+    gap = foreign_acc - filipino_acc if filipino_acc is not None and foreign_acc is not None else None
+
+    return {
+        "filipino_reference": per_group["filipino_reference"],
+        "foreign_reference": per_group["foreign_reference"],
+        "n_unclassified": n_unclassified,
+        "exact_accuracy_gap_foreign_minus_filipino": gap,
+    }
+
+
+def _true_slots_for_row(raw_row: dict, grammar: Grammar) -> dict | None:
+    """Ground-truth slot values for one Option B manifest row, derived by
+    parsing its OWN resolved transcript through `grammar` -- the same
+    digit-spelling (`prepare_ctc_transcript`) and normalization
+    (`optionb.text.normalize_text`) applied before training (see
+    `vcm.text.resolve_transcript`'s `optionb` branch) -- rather than a
+    hand-maintained lookup table that could drift from what the model was
+    actually trained to predict. `None` if the resolved transcript isn't
+    accepted by `grammar` at all, or accepted only under a different
+    intent than `raw_row["label"]` -- both should be impossible for a
+    genuine Option B canonical phrase; reported via
+    `n_unparseable_ground_truth` rather than raising, since a QA-flagged
+    manifest row surviving into `target_commands` is a data problem, not a
+    reason to crash the eval run."""
+    resolved = prepare_ctc_transcript(raw_row.get("transcript", ""))
+    normalized = optionb_normalize_text(resolved)
+    matches = grammar.accepts(normalized)
+    if not matches:
+        return None
+    for intent, slots in matches:
+        if intent == raw_row.get("label"):
+            return slots
+    return None
+
+
+def slot_accuracy_breakdown(
+    results: list[RowResult], raw_rows: list[dict], grammar: Grammar, threshold: float
+) -> dict | None:
+    """Among `target_commands` rows whose true intent carries at least one
+    grammar slot (derived from `grammar.all_phrases()`, not hardcoded --
+    stays correct if the grammar changes), and whose predicted intent is
+    already correct: what fraction ALSO got every slot value right (e.g.
+    predicted `AMPM=am` when the clip actually said "9 PM")? Answers "does
+    the model get intent right but the slot value wrong" -- a question the
+    existing `exact_accuracy`/`per_intent_confusion` metrics cannot answer,
+    since they only compare `intent == label`, never `decoded.slots`.
+
+    Restricted to `source_dataset == "optionb"` rows: Option A's
+    (`vcm.optiona`) canonical `INTENT_PHRASES` dataset clips carry no slot
+    values at all (bare phrases like "set alarm"), so this metric is not
+    meaningful for `spec`/`toy` runs. Returns `None` when no classifiable,
+    slot-bearing Option B target row exists (e.g. `--grammar spec,toy`, or
+    an `--grammar optionb` run whose current grammar happens to have no
+    slotted intents)."""
+    slotted_intents = {intent for _, intent, slots in grammar.all_phrases() if slots}
+    if not slotted_intents:
+        return None
+
+    n_checked = 0
+    n_unparseable = 0
+    n_intent_correct = 0
+    n_intent_and_slots_correct = 0
+    per_slot_name: dict[str, dict[str, int]] = {}
+
+    for r in results:
+        if r.bucket != TARGET_BUCKET or r.source_dataset != "optionb" or r.label not in slotted_intents:
+            continue
+        n_checked += 1
+        true_slots = _true_slots_for_row(raw_rows[r.index], grammar)
+        if true_slots is None:
+            n_unparseable += 1
+            continue
+        if not (_accepted(r, threshold) and r.intent == r.label):
+            continue
+        n_intent_correct += 1
+        if r.slots == true_slots:
+            n_intent_and_slots_correct += 1
+        for slot_name, true_value in true_slots.items():
+            stat = per_slot_name.setdefault(slot_name, {"n": 0, "n_correct": 0})
+            stat["n"] += 1
+            if r.slots.get(slot_name) == true_value:
+                stat["n_correct"] += 1
+
+    if n_checked == 0:
+        return None
+
+    return {
+        "n_slot_bearing_target_rows": n_checked,
+        "n_unparseable_ground_truth": n_unparseable,
+        "n_intent_correct": n_intent_correct,
+        "n_intent_and_slots_correct": n_intent_and_slots_correct,
+        "slot_exact_match_rate_given_intent_correct": (
+            n_intent_and_slots_correct / n_intent_correct if n_intent_correct else None
+        ),
+        "per_slot_name_accuracy": {
+            name: {
+                "n": stat["n"],
+                "n_correct": stat["n_correct"],
+                "accuracy": stat["n_correct"] / stat["n"] if stat["n"] else None,
+            }
+            for name, stat in sorted(per_slot_name.items())
+        },
+    }
+
+
 def evaluate_grammar(
     model,
     feature_extractor: LogMelFeatureExtractor,
@@ -290,6 +487,8 @@ def evaluate_grammar(
             "per_intent_confusion": confusion,
             "false_accept_rate_babble": false_accept_stats(test_results, threshold, "babble"),
             "false_accept_rate_silence": false_accept_stats(test_results, threshold, "silence"),
+            "speaker_group_breakdown": speaker_group_breakdown(test_results, threshold),
+            "slot_accuracy": slot_accuracy_breakdown(test_results, test_dataset.rows, grammar, threshold),
         },
     }
 
@@ -480,6 +679,68 @@ def render_markdown(report: dict) -> str:
             "thresholds; it is not an unconditional property of the model."
         )
         lines.append("")
+
+        breakdown = ts.get("speaker_group_breakdown")
+        if breakdown is not None:
+            lines.append("### Speaker-group breakdown")
+            lines.append("")
+            lines.append(
+                "> **Caveat:** the test-split Filipino group is a single "
+                "held-out speaker (`s100`, 180 clips), so a gap here "
+                "confounds accent with speaker identity. 13 of the 16 "
+                "Filipino speakers (2,146 clips) are in the train split, "
+                "so this checkpoint is not accent-naive."
+            )
+            lines.append("")
+            lines.append("| group | n | accept_rate | exact_accuracy | 95% CI |")
+            lines.append("|---|---|---|---|---|")
+            for group_name in ("filipino_reference", "foreign_reference"):
+                g = breakdown[group_name]
+                accept_str = f"{g['accept_rate']:.3f}" if g["accept_rate"] is not None else "n/a"
+                acc_str = f"{g['exact_accuracy']:.3f}" if g["exact_accuracy"] is not None else "n/a"
+                ci = g["exact_accuracy_ci95"]
+                ci_str = f"[{ci[0]:.3f}, {ci[1]:.3f}]" if ci is not None else "n/a"
+                lines.append(f"| {group_name} | {g['n']} | {accept_str} | {acc_str} | {ci_str} |")
+            gap = breakdown["exact_accuracy_gap_foreign_minus_filipino"]
+            gap_str = f"{gap:.3f}" if gap is not None else "n/a"
+            lines.append("")
+            lines.append(
+                f"- exact_accuracy_gap_foreign_minus_filipino: {gap_str}; "
+                f"n_unclassified: {breakdown['n_unclassified']}"
+            )
+            lines.append("")
+
+        slot_acc = ts.get("slot_accuracy")
+        if slot_acc is not None:
+            lines.append("### Slot accuracy")
+            lines.append("")
+            lines.append(
+                "> Intent-level accuracy above only checks `intent == label` -- "
+                "it does not check whether a slot value (e.g. which hour an "
+                "ALARM clip named) was extracted correctly. This section "
+                "does: among slot-bearing Option B target clips whose "
+                "predicted intent was already correct, what fraction also "
+                "got every slot value right."
+            )
+            lines.append("")
+            rate = slot_acc["slot_exact_match_rate_given_intent_correct"]
+            rate_str = f"{rate:.3f}" if rate is not None else "n/a"
+            lines.append(
+                f"- {slot_acc['n_intent_and_slots_correct']}/"
+                f"{slot_acc['n_intent_correct']} intent-correct clips also "
+                f"had every slot value correct ({rate_str}), out of "
+                f"{slot_acc['n_slot_bearing_target_rows']} slot-bearing "
+                f"target clips ({slot_acc['n_unparseable_ground_truth']} "
+                "with unparseable ground truth)"
+            )
+            lines.append("")
+            lines.append("| slot | n (intent-correct clips) | n correct | accuracy |")
+            lines.append("|---|---|---|---|")
+            for slot_name, stat in slot_acc["per_slot_name_accuracy"].items():
+                acc_str = f"{stat['accuracy']:.3f}" if stat["accuracy"] is not None else "n/a"
+                lines.append(f"| {slot_name} | {stat['n']} | {stat['n_correct']} | {acc_str} |")
+            lines.append("")
+
         lines.append("### Per-intent accept/confusion counts (test split)")
         lines.append("")
         lines.append("| true intent | predicted distribution |")
