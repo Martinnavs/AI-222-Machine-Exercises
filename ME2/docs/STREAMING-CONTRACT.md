@@ -287,6 +287,50 @@ accept/reject decision is what lets that decision evolve (a different
 threshold, a smarter policy, a `--log-all-windows` audit trail) without
 touching the decoder or re-running inference.
 
+### A concrete future policy: mode-across-a-bounded-listening-period
+
+Two related, real (not hypothetical) failure modes were observed testing
+this feature against the live microphone on real hardware, both
+consistent with the confidence/padding-sensitivity finding above:
+
+1. **Lingering duplicate triggers on a correctly-spoken phrase.** At the
+   shipped defaults (`window_s=2.5`, `stride_s=0.25`, `refractory_s=1.5`),
+   a spoken phrase stays inside the sliding window for close to its full
+   duration as the window advances, so it decodes correctly across
+   roughly ten consecutive windows, not one. `Debouncer` only blocks a
+   *second* trigger for `refractory_s` after the first; since the phrase
+   can still be sitting in the window once that cooldown expires, it
+   fires again on what is mechanically the same utterance. Observed
+   directly in manual testing: two `TIME` triggers at `t=2.0s` and
+   `t=3.5s` -- a gap of exactly `1.5s`, matching `refractory_s` to the
+   decimal -- from a single lingering decode, not two independent
+   utterances.
+2. **False positives during fast speech/walkthroughs.** Consistent with
+   the padding-sensitivity mechanism: confidence is a mean per-frame
+   log-prob over the *whole* fixed window, so a short or partially-formed
+   phrase is diluted by the surrounding non-speech frames in the same way
+   ambient noise is, and can still land just inside the threshold.
+
+Once a wake-word gate exists and defines a bounded "listening period"
+(see section 6), the natural fix for both is a policy that consumes
+every `WindowObservation` across that whole period and takes the
+**mode** (most frequent decode) across it, emitting one consolidated
+`TriggerEvent` for the period rather than accepting the first window
+that individually clears the threshold. This is exactly the shape
+`AcceptancePolicy.observe`/`reset`'s statefulness was reserved for (see
+above) -- it needs rolling history across a bounded window of
+observations, which `ThresholdPolicy` doesn't use but the protocol
+already supports. Implementing it would be a new class in `policy.py`
+plus one `POLICY_REGISTRY` line (`vcm/streaming/config.py`); it requires
+no change to the runner, the decoder, or `Debouncer`. It would also
+resolve failure mode 1 as a side effect -- mode-across-a-bounded-period
+naturally collapses "the same phrase decoded ten times in a row" into
+one answer, rather than relying on refractory timing to suppress the
+repeats. Not implemented here: it is meaningless without the bounded
+period a wake-word gate would define, and building it against an
+arbitrary/unbounded window would be speculative in exactly the way this
+feature otherwise avoids.
+
 ## 5. JSONL event schema (owned by Task 04, shape fixed here)
 
 One JSON object per line, one line per emitted `TriggerEvent` (or, under
