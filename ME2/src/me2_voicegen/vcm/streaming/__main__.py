@@ -211,18 +211,20 @@ def main(argv: Optional[list[str]] = None) -> None:
 
     # Hard --gate/--policy cross-validation: both must fire before any side
     # effect (no model load, no TTY raw mode, no microphone).
-    if cfg.policy == "mode_period" and cfg.gate == "none":
+    if cfg.policy in ("mode_period", "single_period") and cfg.gate == "none":
         raise SystemExit(
-            "--policy mode_period requires a listening gate: pass --gate "
+            f"--policy {cfg.policy} requires a listening gate: pass --gate "
             "spacebar (with --gate-period for the period length) -- --gate "
             "none is not a valid combination with --policy mode_period"
         )
-    if cfg.gate == "spacebar" and cfg.policy != "mode_period":
+    if cfg.gate == "spacebar" and cfg.policy not in ("mode_period", "single_period"):
         raise SystemExit(
             "--gate spacebar opens a bounded listening period that only "
-            "--policy mode_period consumes: pass --policy mode_period, or "
+            "--policy mode_period or --policy single_period consumes: pass one, or "
             "use --gate none with --policy threshold"
         )
+    if cfg.policy == "single_period" and cfg.gate_period_s != 3.0:
+        raise SystemExit("--policy single_period requires --gate-period 3 (the evaluated full-inference duration)")
 
     gate: Optional[ListeningGate] = None
     if cfg.gate != "none":

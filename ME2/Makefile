@@ -94,6 +94,9 @@ optionb-eval:
 stream:
 	$(UV) run python -m me2_voicegen.vcm.streaming --model $(STREAM_MODEL) --backend $(STREAM_BACKEND) --source "$(STREAM_SOURCE)" $(STREAM_ARGS)
 
+stream-single-period:
+	$(MAKE) stream STREAM_ARGS="--policy single_period --gate spacebar --gate-period 3 --threshold -0.132222 --log-periods"
+
 test:
 	$(UV) run pytest
 

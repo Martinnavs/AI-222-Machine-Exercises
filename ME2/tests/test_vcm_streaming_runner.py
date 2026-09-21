@@ -28,9 +28,9 @@ from me2_voicegen.vcm.decoder import NEG_INF, decode
 from me2_voicegen.vcm.optionb import OPTIONB_GRAMMAR
 from me2_voicegen.vcm.pipeline import logp_for_waveform
 from me2_voicegen.vcm.streaming.backends import OnnxBackend, TorchBackend
-from me2_voicegen.vcm.streaming.config import resolve_grammar, resolve_threshold
+from me2_voicegen.vcm.streaming.config import resolve_grammar, resolve_policy, resolve_threshold
 from me2_voicegen.vcm.streaming.gate import GateState
-from me2_voicegen.vcm.streaming.policy import ModePeriodPolicy, ThresholdPolicy
+from me2_voicegen.vcm.streaming.policy import ModePeriodPolicy, SinglePeriodPolicy, ThresholdPolicy
 from me2_voicegen.vcm.streaming.runner import StreamingRunner, TriggerEvent
 from me2_voicegen.vcm.streaming.sources import WavFileSource
 
@@ -148,6 +148,16 @@ class _FixedLogpBackend:
 
     def logp_for_waveform(self, waveform: np.ndarray) -> np.ndarray:
         return self._logp
+
+
+class _RecordingLogpBackend(_FixedLogpBackend):
+    def __init__(self, logp: np.ndarray) -> None:
+        super().__init__(logp)
+        self.waveforms: list[np.ndarray] = []
+
+    def logp_for_waveform(self, waveform: np.ndarray) -> np.ndarray:
+        self.waveforms.append(waveform.copy())
+        return super().logp_for_waveform(waveform)
 
 
 class _KeyframeStubBackend:
@@ -771,6 +781,47 @@ def test_mode_period_policy_emits_one_consolidated_event_overriding_flush_window
     assert len(gate.poll_waveforms) == summary.windows
     assert np.array_equal(gate.poll_waveforms[0], samples[:stride_samples])
     assert all(isinstance(w, np.ndarray) and w.size > 0 for w in gate.poll_waveforms)
+
+
+def test_single_period_runs_one_exact_gate_interval_inference():
+    stride = int(0.25 * SAMPLE_RATE)
+    period_s = 3.0
+    open_at = stride
+    close_at = open_at + int(period_s * SAMPLE_RATE)
+    samples = np.arange(close_at + stride, dtype=np.float32)
+    backend = _RecordingLogpBackend(_one_hot_logp(_forced_ids(TARGET_PHRASE, pad_to=200)))
+    policy = SinglePeriodPolicy(-1e6, gate=_ScriptedFakeGate(open_at, period_s), period_s=period_s)
+    runner = StreamingRunner(
+        source=_ArrayAudioSource(samples, block_samples=stride), backend=backend,
+        grammar=OPTIONB_GRAMMAR, policy=policy, window_s=2.5, stride_s=0.25,
+        refractory_s=0.0, beam_width=25, out=io.StringIO(),
+    )
+    summary = runner.run()
+    assert summary.events == 1
+    assert len(backend.waveforms) == 1
+    assert np.array_equal(backend.waveforms[0], samples[open_at:close_at])
+
+
+def test_single_period_requires_exactly_three_seconds():
+    gate = _ScriptedFakeGate(open_at=0, period_s=3.0)
+    with pytest.raises(SystemExit, match="--gate-period 3"):
+        resolve_policy("single_period", -0.1, gate=gate, period_s=5.0)
+
+
+def test_single_period_discards_incomplete_period_without_inference():
+    stride = int(0.25 * SAMPLE_RATE)
+    open_at = stride
+    close_at = open_at + int(3.0 * SAMPLE_RATE)
+    backend = _RecordingLogpBackend(_one_hot_logp(_forced_ids(TARGET_PHRASE, pad_to=200)))
+    runner = StreamingRunner(
+        source=_ArrayAudioSource(np.zeros(close_at - stride, dtype=np.float32), block_samples=stride),
+        backend=backend, grammar=OPTIONB_GRAMMAR,
+        policy=SinglePeriodPolicy(-1e6, gate=_ScriptedFakeGate(open_at, 3.0), period_s=3.0),
+        window_s=2.5, stride_s=0.25, refractory_s=0.0, beam_width=25, out=io.StringIO(),
+    )
+    summary = runner.run()
+    assert summary.events == 0
+    assert backend.waveforms == []
 
 
 def test_jsonl_payload_key_set_unchanged():

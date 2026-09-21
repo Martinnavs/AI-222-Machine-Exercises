@@ -581,6 +581,7 @@ make stream                                    # live mic, optionc preset, ONNX 
 make stream STREAM_SOURCE=path/to/clip.wav     # deterministic file replay instead
 make stream STREAM_ARGS="--policy mode_period --gate spacebar"      # gated run: SPACE opens a 5.0 s listening period
 make stream STREAM_ARGS="--policy mode_period --gate spacebar --gate-period 10"
+make stream-single-period                         # one exact 3.0 s inference per SPACE press
 ```
 
 or directly:
@@ -636,11 +637,28 @@ gate: closed    t=17.30s  period: REJECT  silence dominated the period (None 9/1
 The JSONL on stdout is unchanged (an accepted period still emits its `"event": "trigger"`
 line); `--log-all-windows` remains the full per-window verbosity.
 
+### Single full-period inference
+
+`single_period` is the low-compute alternative to `mode_period`: it collects
+exactly 3.0 seconds after SPACE, makes one model inference and grammar decode
+over that exact interval, then uses the normal threshold and debounce.
+
+```bash
+make stream-single-period
+# equivalent:
+make stream STREAM_ARGS="--policy single_period --gate spacebar --gate-period 3 --threshold -0.132222 --log-periods"
+```
+
+The explicit `-0.132222` is the provisional zero-false-accept winner from the
+local scorer spike (89 negative windows), not a production FAR/hour
+calibration. `single_period` requires `--gate spacebar --gate-period 3`;
+choose `mode_period` when you want the existing multi-window vote.
+
 Gated runs are intended for the live microphone: file replay is lockstep (it runs faster
 than real time), so keypress timing against the audio stream is unreliable.
 
 Two flag combinations are hard errors (exit 1 with an actionable message, before any model
-load or microphone open, never a traceback): `--policy mode_period` without a gate, and
+load or microphone open, never a traceback): `--policy mode_period` or `--policy single_period` without a gate, and
 `--gate spacebar` with `--policy threshold` — the gate and the policy are only useful
 together, and a silently ignored flag would be a trap. `--gate spacebar` also fails fast
 (exit 1, actionable message: run in an interactive shell, pass `--gate none`, or replay a

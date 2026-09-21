@@ -118,16 +118,21 @@ flags (StreamingConfig.merge)`:
 `MODEL_REGISTRY = {"optionc": out/vcm/optionb-optionc, "default":
 out/vcm/optionb}` (`optionc` is the config default -- it beats `default` on
 every eval metric, see this ticket's Execution Log). `POLICY_REGISTRY =
-{"threshold": ThresholdPolicy, "mode_period": ModePeriodPolicy}`.
+{"threshold": ThresholdPolicy, "mode_period": ModePeriodPolicy,
+"single_period": SinglePeriodPolicy}`. `single_period` requests one exact
+3.0 s absolute sample interval from the runner at period close, then receives
+that interval's one decode for ordinary threshold acceptance. It is separate
+from `mode_period`, which decodes every stride and votes; the runner retains
+period-plus-window audio so close polling/catch-up cannot contaminate its interval.
 `resolve_policy(name, threshold, *, gate=None, period_s=5.0,
 on_period_event=None)` is backward-compatible (resolving `threshold` is
-unchanged), but `mode_period` requires a non-`None` `gate` -- resolving
+unchanged), but `mode_period` and `single_period` require a non-`None` `gate` -- resolving
 it without one raises an actionable `SystemExit`, and the CLI enforces
 the same rule as a hard cross-validation error (section 6).
 `on_period_event` (a `policy.PeriodEventCallback`:
 `(event, samples_seen, decision) -> None`) is forwarded to
-`ModePeriodPolicy` only -- the CLI's `--log-periods` digest wires its
-stderr printer there (section 6); `ThresholdPolicy` never receives it.
+both period policies -- the CLI's `--log-periods` digest wires its stderr
+printer there (section 6); `ThresholdPolicy` never receives it.
 
 **Security note (both `--model` code paths are trust boundaries):**
 `resolve_model`'s result is later fed to either `torch.load` (pickle RCE) or

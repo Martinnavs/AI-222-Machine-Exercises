@@ -110,7 +110,12 @@ class StreamingRunner:
         self._out = out
         self._summary_out = summary_out
 
-        self._buffer = RingBuffer(self.window_samples)
+        period_samples = int(getattr(policy, "period_samples", 0))
+        # A single-period close may be observed after the realtime loop has
+        # crossed several strides. Retain a full ordinary window beyond the
+        # requested period so its exact [open, close) interval survives that
+        # catch-up delay.
+        self._buffer = RingBuffer(max(self.window_samples, period_samples + self.window_samples))
         self._debouncer = Debouncer(self.refractory_samples)
 
         self._window_index = 0
@@ -225,6 +230,12 @@ class StreamingRunner:
         self._debouncer.tick(strides_elapsed * self.stride_samples)
 
         waveform = self._buffer.snapshot()
+        period_request = getattr(self.policy, "period_request", None)
+        if period_request is not None:
+            request = period_request(samples_seen, waveform)
+            if request is None:
+                return
+            waveform = self._buffer.snapshot_range(request.start_samples, request.end_samples)
         logp = np.asarray(self.backend.logp_for_waveform(waveform))
         result = decode(logp, self.grammar, threshold=NEG_INF, beam_width=self.beam_width)
 
@@ -233,6 +244,9 @@ class StreamingRunner:
             waveform=waveform
         )
         decision = self.policy.observe(obs)
+        period_closed = getattr(self.policy, "period_closed", None)
+        if period_request is not None and period_closed is not None:
+            period_closed(samples_seen, decision)
         authoritative = decision.result if decision.result is not None else result
         emitted = self._debouncer.gate(decision.accept)
 

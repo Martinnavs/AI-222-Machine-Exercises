@@ -44,6 +44,7 @@ from me2_voicegen.vcm.streaming.gate import ListeningGate
 from me2_voicegen.vcm.streaming.policy import (
     AcceptancePolicy,
     ModePeriodPolicy,
+    SinglePeriodPolicy,
     PeriodEventCallback,
     ThresholdPolicy,
 )
@@ -58,6 +59,7 @@ MODEL_REGISTRY: dict[str, Path] = {
 POLICY_REGISTRY: dict[str, type[AcceptancePolicy]] = {
     "threshold": ThresholdPolicy,
     "mode_period": ModePeriodPolicy,
+    "single_period": SinglePeriodPolicy,
 }
 
 DEFAULT_GRAMMAR_LABEL = "OPTIONB_GRAMMAR"
@@ -332,13 +334,15 @@ def resolve_policy(
         raise SystemExit(
             f"unknown --policy {name!r}; choices are {sorted(POLICY_REGISTRY)}"
         ) from None
-    if name == "mode_period":
+    if name in ("mode_period", "single_period"):
         if gate is None:
             raise SystemExit(
                 f"--policy {name!r} requires a listening gate: pass --gate "
                 f"spacebar (with --gate-period for the period length) -- "
                 f"--gate none is not a valid combination with --policy {name!r}"
             )
+        if name == "single_period" and period_s != 3.0:
+            raise SystemExit("--policy single_period requires --gate-period 3 (the evaluated full-inference duration)")
         return policy_cls(
             threshold, gate=gate, period_s=period_s, on_period_event=on_period_event
         )

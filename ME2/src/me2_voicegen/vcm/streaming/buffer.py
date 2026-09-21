@@ -76,3 +76,17 @@ class RingBuffer:
             if pos == 0:
                 return self._data.copy()
             return np.concatenate([self._data[pos:], self._data[:pos]])
+
+    def snapshot_range(self, start_samples: int, end_samples: int) -> np.ndarray:
+        """Return an exact absolute sample interval still retained in the ring."""
+        with self._lock:
+            oldest = max(0, self.samples_written - self.window_samples)
+            if start_samples < oldest or end_samples > self.samples_written or start_samples >= end_samples:
+                raise ValueError(
+                    f"requested [{start_samples}, {end_samples}) is not retained "
+                    f"in [{oldest}, {self.samples_written})"
+                )
+            if not self._filled:
+                return self._data[start_samples:end_samples].copy()
+            ordered = self._data.copy() if self._write_pos == 0 else np.concatenate([self._data[self._write_pos:], self._data[:self._write_pos]])
+            return ordered[start_samples - oldest : end_samples - oldest].copy()

@@ -31,6 +31,12 @@ class PolicyDecision:
     result: Optional[DecodeResult] = None  # authoritative override; None = window's own result
 
 
+@dataclass(frozen=True)
+class PeriodRequest:
+    start_samples: int
+    end_samples: int
+
+
 # Optional period-lifecycle sink (the CLI's `--log-periods` digest wires a
 # printer here): called with (event, samples_seen, decision), where event is
 # "open" (a press), "reopened" (a mid-period re-press), or "closed" (the
@@ -204,3 +210,38 @@ class ModePeriodPolicy:
     @staticmethod
     def _winner_key(grouped):
         return min(grouped.items(), key=lambda item: (-item[1][1], -item[1][2], item[1][0]))[0]
+
+
+class SinglePeriodPolicy(ThresholdPolicy):
+    """One exact gate-bounded waveform -> one decode -> threshold decision."""
+
+    def __init__(self, threshold: float, *, gate: ListeningGate, period_s: float, on_period_event=None) -> None:
+        super().__init__(threshold)
+        self._gate = gate
+        self.period_samples = int(period_s * SAMPLE_RATE)
+        self._open_at: Optional[int] = None
+        self._on_period_event = on_period_event
+
+    def period_request(self, samples_seen: int, waveform: np.ndarray) -> Optional[PeriodRequest]:
+        state = self._gate.poll(samples_seen, waveform)
+        if self._open_at is not None and samples_seen >= self._open_at + self.period_samples:
+            request = PeriodRequest(self._open_at, self._open_at + self.period_samples)
+            self._open_at = None
+            if state.is_open:
+                self._open_at = state.open_at_samples
+                if self._on_period_event is not None:
+                    self._on_period_event("open", samples_seen, None)
+            return request
+        if state.is_open:
+            event = "open" if self._open_at is None else "reopened"
+            self._open_at = state.open_at_samples
+            if self._on_period_event is not None:
+                self._on_period_event(event, samples_seen, None)
+        return None
+
+    def period_closed(self, samples_seen: int, decision: PolicyDecision) -> None:
+        if self._on_period_event is not None:
+            self._on_period_event("closed", samples_seen, decision)
+
+    def reset(self) -> None:
+        self._open_at = None
