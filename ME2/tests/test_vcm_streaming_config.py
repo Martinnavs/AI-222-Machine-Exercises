@@ -10,6 +10,7 @@ import json
 
 import pytest
 
+from me2_voicegen.common.features import SAMPLE_RATE
 from me2_voicegen.vcm.streaming.config import (
     FALLBACK_THRESHOLD,
     MODEL_REGISTRY,
@@ -19,7 +20,7 @@ from me2_voicegen.vcm.streaming.config import (
     resolve_policy,
     resolve_threshold,
 )
-from me2_voicegen.vcm.streaming.policy import ThresholdPolicy
+from me2_voicegen.vcm.streaming.policy import ModePeriodPolicy, ThresholdPolicy
 
 
 def _make_run_dir(tmp_path, name="run", with_export=True, with_checkpoint=True, variants=("fp32",)):
@@ -184,6 +185,39 @@ def test_resolve_policy_unknown_name_lists_valid_choices():
         assert choice in message
 
 
+def test_resolve_policy_mode_period_without_gate_is_actionable_system_exit():
+    with pytest.raises(SystemExit) as excinfo:
+        resolve_policy("mode_period", threshold=-0.1)
+    message = str(excinfo.value)
+    assert "--gate" in message
+    assert "spacebar" in message
+    assert "none" in message
+
+
+class _FakeGate:
+    def poll(self, samples_seen, window=None):
+        raise NotImplementedError
+
+    def close(self) -> None:
+        raise NotImplementedError
+
+
+def test_resolve_policy_mode_period_wires_gate_and_period():
+    gate = _FakeGate()
+    policy = resolve_policy("mode_period", threshold=-0.1, gate=gate, period_s=2.5)
+    assert isinstance(policy, ModePeriodPolicy)
+    assert policy.threshold == -0.1
+    assert policy._gate is gate
+    assert policy._period_samples == int(2.5 * SAMPLE_RATE)
+
+
+def test_resolve_policy_mode_period_defaults_period_to_5_s():
+    gate = _FakeGate()
+    policy = resolve_policy("mode_period", threshold=-0.1, gate=gate)
+    assert isinstance(policy, ModePeriodPolicy)
+    assert policy._period_samples == int(5.0 * SAMPLE_RATE)
+
+
 # ---------------------------------------------------------------------------
 # StreamingConfig.from_json / precedence merge
 # ---------------------------------------------------------------------------
@@ -267,6 +301,51 @@ def test_from_json_rejects_backend_outside_cli_choices(tmp_path):
     assert "backend" in str(excinfo.value)
 
 
+def test_streaming_config_gate_field_defaults():
+    config = StreamingConfig()
+    assert config.gate == "none"
+    assert config.gate_period_s == 5.0
+
+
+def test_policy_registry_contains_mode_period():
+    assert POLICY_REGISTRY["mode_period"] is ModePeriodPolicy
+
+
+def test_from_json_accepts_gate_and_gate_period(tmp_path):
+    config_path = tmp_path / "config.json"
+    config_path.write_text(json.dumps({"gate": "spacebar", "gate_period_s": 2.5}))
+    config = StreamingConfig.from_json(config_path)
+    assert config.gate == "spacebar"
+    assert config.gate_period_s == 2.5
+
+
+def test_from_json_rejects_gate_outside_cli_choices(tmp_path):
+    config_path = tmp_path / "config.json"
+    config_path.write_text(json.dumps({"gate": "bogus"}))
+    with pytest.raises(SystemExit) as excinfo:
+        StreamingConfig.from_json(config_path)
+    message = str(excinfo.value)
+    assert "gate" in message
+    assert "none" in message
+    assert "spacebar" in message
+
+
+def test_from_json_rejects_non_string_gate(tmp_path):
+    config_path = tmp_path / "config.json"
+    config_path.write_text(json.dumps({"gate": 123}))
+    with pytest.raises(SystemExit) as excinfo:
+        StreamingConfig.from_json(config_path)
+    assert "gate" in str(excinfo.value)
+
+
+def test_from_json_rejects_non_numeric_gate_period_s(tmp_path):
+    config_path = tmp_path / "config.json"
+    config_path.write_text(json.dumps({"gate_period_s": "not-a-number"}))
+    with pytest.raises(SystemExit) as excinfo:
+        StreamingConfig.from_json(config_path)
+    assert "gate_period_s" in str(excinfo.value)
+
+
 def test_from_json_rejects_non_int_ort_threads_that_does_not_coerce(tmp_path):
     config_path = tmp_path / "config.json"
     config_path.write_text(json.dumps({"ort_threads": "not-a-number"}))
@@ -342,3 +421,47 @@ def dataclasses_frozen_error_types():
     import dataclasses
 
     return (dataclasses.FrozenInstanceError,)
+
+
+# ---------------------------------------------------------------------------
+# log_periods field + resolve_policy's period-event sink (--log-periods)
+# ---------------------------------------------------------------------------
+
+
+def test_streaming_config_log_periods_defaults_false():
+    assert StreamingConfig().log_periods is False
+    assert StreamingConfig(log_periods=True).log_periods is True
+
+
+def test_from_json_accepts_log_periods_bool(tmp_path):
+    path = tmp_path / "config.json"
+    path.write_text('{"log_periods": true}')
+    assert StreamingConfig.from_json(path).log_periods is True
+
+
+def test_from_json_rejects_non_bool_log_periods(tmp_path):
+    path = tmp_path / "config.json"
+    path.write_text('{"log_periods": "yes"}')
+    with pytest.raises(SystemExit) as excinfo:
+        StreamingConfig.from_json(path)
+    assert "log_periods" in str(excinfo.value)
+
+
+def test_resolve_policy_forwards_period_event_sink_to_mode_period_only():
+    class _StandinGate:
+        """Duck-typed `ListeningGate`; resolve_policy only stores it."""
+
+    events: list = []
+
+    def _sink(event, samples_seen, decision):
+        events.append(event)
+
+    policy = resolve_policy(
+        "mode_period", -0.1, gate=_StandinGate(), period_s=5.0, on_period_event=_sink
+    )
+    assert policy._on_period_event is _sink
+
+    # default stays None; the threshold policy never receives the kwarg
+    assert resolve_policy("mode_period", -0.1, gate=_StandinGate())._on_period_event is None
+    threshold_policy = resolve_policy("threshold", -0.1)
+    assert not hasattr(threshold_policy, "_on_period_event")

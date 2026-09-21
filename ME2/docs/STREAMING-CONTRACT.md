@@ -104,11 +104,30 @@ flags (StreamingConfig.merge)`:
 - `mic_command: Optional[str] = None`
 - `listen_for: Optional[float] = None`
 - `log_all_windows: bool = False`
+- `gate: str = "none"` (`"none"` | `"spacebar"`) -- `GATE_REGISTRY` name
+  (`resolve_gate`); which listening gate bounds the policy's listening
+  periods (section 6).
+- `gate_period_s: float = 5.0` -- listening-period length in seconds, the
+  single source passed to both the gate's auto-close and the
+  `mode_period` policy's flush boundary, so the two close boundaries
+  always agree.
+- `log_periods: bool = False` -- per-period digest on stderr (gate
+  open/close lines plus the period's consolidated result); the JSONL on
+  stdout is unchanged (section 6).
 
 `MODEL_REGISTRY = {"optionc": out/vcm/optionb-optionc, "default":
 out/vcm/optionb}` (`optionc` is the config default -- it beats `default` on
 every eval metric, see this ticket's Execution Log). `POLICY_REGISTRY =
-{"threshold": ThresholdPolicy}`.
+{"threshold": ThresholdPolicy, "mode_period": ModePeriodPolicy}`.
+`resolve_policy(name, threshold, *, gate=None, period_s=5.0,
+on_period_event=None)` is backward-compatible (resolving `threshold` is
+unchanged), but `mode_period` requires a non-`None` `gate` -- resolving
+it without one raises an actionable `SystemExit`, and the CLI enforces
+the same rule as a hard cross-validation error (section 6).
+`on_period_event` (a `policy.PeriodEventCallback`:
+`(event, samples_seen, decision) -> None`) is forwarded to
+`ModePeriodPolicy` only -- the CLI's `--log-periods` digest wires its
+stderr printer there (section 6); `ThresholdPolicy` never receives it.
 
 **Security note (both `--model` code paths are trust boundaries):**
 `resolve_model`'s result is later fed to either `torch.load` (pickle RCE) or
@@ -204,18 +223,28 @@ class WindowObservation:
     window_index: int
     samples_seen: int
     result: DecodeResult        # decoded at threshold=-inf
+    waveform: Optional[np.ndarray] = None   # NEW: the window's audio
+    # (ring-buffer snapshot), forwarded to the listening gate;
+    # None tolerated (tests/fakes)
 
 @dataclass(frozen=True)
 class PolicyDecision:
     accept: bool
     reason: str                 # surfaced by --log-all-windows
+    result: Optional[DecodeResult] = None   # NEW: authoritative override
+    # for the emitted event; None = use the observed window's own
+    # result (ThresholdPolicy and all pre-existing behavior unchanged)
 
 class AcceptancePolicy(Protocol):
     def observe(self, obs: WindowObservation) -> PolicyDecision: ...
     def reset(self) -> None: ...
 
-class ThresholdPolicy:          # the ONE shipped implementation
+class ThresholdPolicy:          # shipped impl 1: per-window threshold gate
     """accept iff result.intent is not None and result.confidence >= threshold"""
+
+class ModePeriodPolicy:         # shipped impl 2: one decision per listening period
+    def __init__(self, threshold: float, *, gate: ListeningGate,
+                 period_s: float) -> None: ...
 ```
 
 `WindowObservation`/`PolicyDecision` are frozen dataclasses. `observe`/
@@ -227,7 +256,25 @@ history entirely (it's a pure function of the one `WindowObservation`
 it's given, it just happens to satisfy the stateful protocol). Likewise
 `PolicyDecision` is a dataclass, not a bare `bool`, so a future policy
 that needs to influence emission (e.g. a per-intent refractory override)
-can gain a field without changing the protocol signature.
+can gain a field without changing the protocol signature -- which is
+exactly what the additive `result` field below did.
+
+Two fields landed additively with `ModePeriodPolicy` (the
+`mode-period-gate` feature, 2026-09-21), both defaulted, both dataclasses
+still frozen:
+
+- `WindowObservation.waveform` carries the window's audio (the ring-
+  buffer snapshot the runner already had for the decode) so a listening
+  gate can see the same audio the model decoded: `SpacebarGate` ignores
+  it, a future wake-word gate consumes it (section 6).
+- `PolicyDecision.result` is an authoritative result override: the
+  runner emits `decision.result`'s intent/slots/text/confidence when it
+  is not `None`, else the window's own result. That is how a period-end
+  flush carries a *previous* window's decode into the event it authorizes
+  (section 5 documents the payload side).
+
+`ThresholdPolicy` is behaviorally unchanged by both: it never sets
+`result` and never reads `waveform`.
 
 ### Fixed pipeline order
 
@@ -241,7 +288,11 @@ Every window is decoded once, at the most permissive threshold; the
 the last emission to actually fire a `TriggerEvent`. This order is
 fixed -- a future policy or backend must not reorder it (e.g. gating the
 decoder call itself on debounce state), because the two questions below
-are deliberately independent.
+are deliberately independent. `ModePeriodPolicy` upholds it: it polls
+its `ListeningGate` (section 6) inside `observe`, at the same stride
+boundary the runner already evaluates -- the gate sits between the
+observation stream and the policy's decision, never between the decoder
+and the policy -- so the chain is unchanged for both shipped policies.
 
 ### Evidence vs. emission-rate: why these are two separate seams
 
@@ -287,7 +338,7 @@ accept/reject decision is what lets that decision evolve (a different
 threshold, a smarter policy, a `--log-all-windows` audit trail) without
 touching the decoder or re-running inference.
 
-### A concrete future policy: mode-across-a-bounded-listening-period
+### The mode-across-a-bounded-listening-period policy (`ModePeriodPolicy`)
 
 Two related, real (not hypothetical) failure modes were observed testing
 this feature against the live microphone on real hardware, both
@@ -311,25 +362,85 @@ consistent with the confidence/padding-sensitivity finding above:
    phrase is diluted by the surrounding non-speech frames in the same way
    ambient noise is, and can still land just inside the threshold.
 
-Once a wake-word gate exists and defines a bounded "listening period"
-(see section 6), the natural fix for both is a policy that consumes
-every `WindowObservation` across that whole period and takes the
-**mode** (most frequent decode) across it, emitting one consolidated
-`TriggerEvent` for the period rather than accepting the first window
-that individually clears the threshold. This is exactly the shape
-`AcceptancePolicy.observe`/`reset`'s statefulness was reserved for (see
-above) -- it needs rolling history across a bounded window of
-observations, which `ThresholdPolicy` doesn't use but the protocol
-already supports. Implementing it would be a new class in `policy.py`
-plus one `POLICY_REGISTRY` line (`vcm/streaming/config.py`); it requires
-no change to the runner, the decoder, or `Debouncer`. It would also
-resolve failure mode 1 as a side effect -- mode-across-a-bounded-period
-naturally collapses "the same phrase decoded ten times in a row" into
-one answer, rather than relying on refractory timing to suppress the
-repeats. Not implemented here: it is meaningless without the bounded
-period a wake-word gate would define, and building it against an
-arbitrary/unbounded window would be speculative in exactly the way this
-feature otherwise avoids.
+Both are fixed by the `mode-period-gate` feature (shipped 2026-09-21):
+the bounded "listening period" is now defined by the `ListeningGate`
+seam (section 6, `SpacebarGate` today, a wake-word detector later), and
+`ModePeriodPolicy` is the policy that consumes every `WindowObservation`
+across one such period and emits at most one consolidated decision for
+it. This is exactly the shape `AcceptancePolicy.observe`/`reset`'s
+statefulness was reserved for (see above) -- rolling history across a
+bounded window of observations, which `ThresholdPolicy` doesn't use but
+the protocol already supports. It landed as one new class in `policy.py`
+plus one `POLICY_REGISTRY` line (`vcm/streaming/config.py`), as the seam
+was designed to allow; the only runner change is the ~6-line
+`_evaluate_window` diff documented in section 5 (the consolidated event
+must carry a *previous* window's decode, and the gate needs the audio).
+
+**What it does.** `ModePeriodPolicy(threshold, *, gate, period_s)`
+implements `observe`/`reset`. Each observation first polls the gate
+(`gate.poll(obs.samples_seen, obs.waveform)`). While the gate is closed
+the observation is rejected outright (`gate closed (not in a listening
+period)`) and nothing is collected. While a period is open, every
+observation is appended to the in-flight collection and `observe`
+returns the non-accepting `collecting (...)` reason (section 5). When
+the first observation with
+`samples_seen >= open_at + int(period_s * SAMPLE_RATE)` arrives, the
+period is **flushed**: the collected observations are grouped by decode
+class `(intent, tuple(sorted(slots.items())))`, the winning class is
+picked by (count desc, confidence-sum desc, earliest-first-seen asc) --
+a deterministic total order, no randomness -- and, when the winning
+class is a real intent, the class's **mean** confidence is compared to
+the operating threshold: accept iff `mean >= threshold`. Whenever a
+real decode class wins, the decision's `result` is set on **both**
+accept and reject to the latest winning observation's decode with its
+confidence replaced by the mean (`dataclasses.replace`), so the runner
+emits the mode's intent/slots/text at the mean confidence even when the
+period-end window itself decoded something else (or nothing); when the
+winning class is the `None` class the flush rejects with the
+silence-dominated reason instead and sets no `result`. In every case
+the collection is cleared after the flush, so a
+period yields at most one accept, and a period that is still open when
+the run ends (Ctrl-C / `--listen-for` / EOF) is simply discarded --
+there is no flush-on-exit. Two further rules are part of the algorithm:
+a **re-press** mid-period (the gate reporting a *new*
+`open_at_samples` while collecting) discards all in-flight observations
+and restarts the period at the new position; and a press landing on the
+*exact* stride a period ends returns the flush decision for that
+observation **and** seeds the new period's collection with the same
+observation (settled at plan confirmation: identical situations are
+handled identically, rather than the new period starting at the next
+observation). `reset()` clears the in-flight period; the runner calls it
+at the start of every run.
+
+**Why both failure modes die.** Failure mode 1 (lingering duplicates):
+one period yields at most one accept, so "the same phrase decoded ten
+times in a row" collapses into the single mode decision instead of
+riding out the debouncer's refractory and firing twice; the
+`Debouncer` still independently rate-limits consecutive *periods* as
+before (a second period's flush landing inside the refractory is
+suppressed and counted in `suppressed` like any other suppression).
+Failure mode 2 (ambient false positives): with the gate closed, decodes
+are rejected before any threshold arithmetic, so a confident ambient
+decode while no period is open cannot trigger at all; inside a period,
+the noise must additionally be the *most frequent* decode class across
+the whole period, and its *mean* confidence must still clear the
+threshold, which intermittent noise can't do.
+
+**The wake-word seam.** The policy depends only on the `ListeningGate`
+protocol (section 6), never on `SpacebarGate` itself: a future
+wake-word gate that detects the wake word in the audio `poll` is handed
+(the `window` argument, carried on `WindowObservation.waveform`) drops
+in with zero policy or runner changes -- the operator presses SPACE
+today, the model detects the wake word later, and nothing between
+`observe` and the emitted event changes.
+
+**Proven by** `tests/test_vcm_streaming_policy.py` (both original
+backlog acceptance criteria are named tests there: ten identical correct
+decodes across one open period collapse to exactly one accept at the
+flush with intent preserved; intermittent low-confidence noise in a
+mostly-`None` period never triggers) and
+`tests/test_vcm_streaming_integration.py` (the same rules, incl. the
+flush/re-press edges, through the real runner).
 
 ## 5. JSONL event schema (owned by Task 04, shape fixed here)
 
@@ -358,12 +469,200 @@ support):
   the two).
 - `t_seconds`: wall-clock-equivalent time, i.e. `samples_seen /
   common.features.SAMPLE_RATE`.
-- `intent`/`slots`/`text`/`confidence`: straight from the window's
-  `DecodeResult` (`None`/`{}`/`""`/`-inf`-equivalent when no grammar
-  terminal was reached at all).
+- `intent`/`slots`/`text`/`confidence`: from the **authoritative**
+  result -- `PolicyDecision.result` when the policy set it, else the
+  window's own `DecodeResult` (`None`/`{}`/`""`/`-inf`-equivalent when
+  no grammar terminal was reached at all). A `ModePeriodPolicy` flush
+  sets it whenever a real decode class wins (on both accept and
+  reject): the period's winning decode class with its confidence
+  replaced by the class mean; the silence-dominated flush sets no
+  `result`. So a gated run's emitted event carries the *mode's*
+  intent/slots/text while `t_seconds`/`window_index` stay the
+  period-end window's, which may have decoded something else.
+  `ThresholdPolicy` never sets it, so threshold-mode records are
+  exactly as before.
 - `policy_reason`: `PolicyDecision.reason` verbatim.
 
-## 6. Forward-compat note: wake-word/gate integration (not decided here)
+### Decision reason formats (per policy)
+
+`policy_reason` is policy-specific; the two shipped policies produce:
+
+`ThresholdPolicy` (one decision per window):
+
+- accept: `intent='CALL' confidence=-0.87 >= threshold -1.0`
+- reject, no decode: `no_match: intent is None`
+- reject, below threshold: `confidence -1.2 below threshold -1.0`
+
+`ModePeriodPolicy` (one decision per listening period, section 4):
+
+- gate closed, no period open: `gate closed (not in a listening period)`
+- period open, still collecting: `collecting (3 obs, running mode
+  'TIME' 2/3)` -- the running mode is the current winning class; `2/3`
+  is its count over the total observations collected so far (the
+  running mode is `None` while no real decode has been seen yet)
+- flush, silence-dominated: `mode_period: silence dominated the period
+  (None 8/10)` -- the `None` class won, with its count over the period's
+  total
+- flush, mode clears the threshold: `mode_period: intent='TIME' mean
+  confidence -0.45 >= threshold -1.0 over 9 obs`
+- flush, mode below the threshold: `mode_period: intent='TIME' mean
+  confidence -1.3 below threshold -1.0 over 9 obs`
+
+Under `--log-all-windows`, a gated run's non-emitted `window` records
+carry the `gate closed` / `collecting (...)` reasons as they accrue and
+the flush records with its flush reason -- no new schema fields either
+way.
+
+## 6. The `ListeningGate` seam (owned by the `mode-period-gate` feature; `vcm/streaming/gate.py`)
+
+The component that bounds a `ModePeriodPolicy`'s listening periods
+(section 4) shipped as an abstract seam with one concrete stand-in,
+`SpacebarGate`. Pipeline position: the gate sits between the observation
+stream and the acceptance policy -- `ModePeriodPolicy.observe` polls it
+at each stride (`gate.poll(samples_seen, waveform)`) and the fixed order
+of section 4 is preserved; a gate sees only the sample position and the
+same ring-buffer snapshot the model decoded, never logp/decode
+internals.
+
+### Protocol signatures
+
+```python
+# vcm/streaming/gate.py
+@dataclass(frozen=True)
+class GateState:
+    is_open: bool
+    open_at_samples: Optional[int]   # None when closed
+
+class ListeningGate(Protocol):
+    """The seam the future wake-word gate will satisfy. `window` is the
+    current ring-buffer snapshot (the same audio the model decoded); a
+    WakeWordGate consumes it, SpacebarGate ignores it."""
+    def poll(self, samples_seen: int, window: Optional[np.ndarray] = None) -> GateState: ...
+    def close(self) -> None: ...
+
+class GateUnavailableError(Exception): ...
+
+class SpacebarGate:
+    def __init__(self, stdin, *, key: bytes = b" ",
+                 period_s: float = 5.0) -> None: ...
+    def poll(self, samples_seen: int, window=None) -> GateState: ...
+    def close(self) -> None: ...
+
+GATE_REGISTRY: dict[str, type[ListeningGate]] = {"spacebar": SpacebarGate}
+def resolve_gate(name: str, *, period_s: float, stdin=sys.stdin) -> ListeningGate: ...
+```
+
+### `SpacebarGate` -- raw TTY, one key, one period
+
+`SpacebarGate` enters minimal raw mode on the operator's own `stdin`
+(clears `ICANON|ECHO`, keeps `ISIG` -- so Ctrl-C still delivers SIGINT
+and is never a gate key), and per `poll` reads pending keypresses with
+`select(timeout=0)` + `os.read(fd, 1)`, draining everything pending at
+that stride (a double-press within one stride yields one
+`open_at_samples`, i.e. one period, not two). A press of `key` (default
+SPACE) opens a period at the current `samples_seen` -- a press while
+already open restarts the period there (discard-and-restart; the policy
+side turns the new `open_at_samples` into an in-flight collection
+reset, section 4) -- every other byte is read and discarded with no
+state change, and the period auto-closes at
+`open_at + int(period_s * SAMPLE_RATE)`. That auto-close expression is
+the same one the policy's flush boundary uses, from the same
+`gate_period_s` source, so the two close boundaries always agree.
+`close()` is idempotent, restores the exact saved termios attributes,
+and is additionally registered with `atexit` as a backstop for failure
+paths between construction and the runner's `try/finally`. Press
+latency is at most one stride (250 ms at the default `stride_s`): the
+gate is polled at stride boundaries, not on a faster tick, so the
+runner keeps its shape.
+
+**Non-TTY failure mode:** if `stdin` is not a usable TTY (piped/
+redirected input, CI, no file descriptor at all), construction raises
+`GateUnavailableError` with an actionable message naming the three ways
+out (run in an interactive shell, pass `--gate none`, or replay a file
+with `--source <wav>`); the CLI catches it and exits 1 with that
+message, never a traceback -- the same fail-fast pattern as
+`MicrophoneUnavailableError` (section 1).
+
+### `GATE_REGISTRY` / `resolve_gate`
+
+`GATE_REGISTRY` maps CLI names to gate classes (today: `"spacebar"`);
+`resolve_gate(name, *, period_s, stdin=sys.stdin)` constructs the named
+gate, and an unknown name raises an actionable `SystemExit` naming
+`sorted(GATE_REGISTRY)` -- the same loud-error style as
+`resolve_policy`/`resolve_model` (section 2).
+
+### CLI wiring (`--gate` / `--gate-period`)
+
+`--gate none|spacebar` (default `none`) and `--gate-period <seconds>`
+(argparse dest `gate_period_s`, default `5.0`) -- or the
+`gate`/`gate_period_s` fields in a `--config` JSON, validated the same
+way (section 2). The CLI cross-validates `--gate` against `--policy` in
+**both directions as a hard error before any side effect** (no model
+load, no TTY raw mode, no microphone): `--policy mode_period` with
+`--gate none` is rejected (a mode-period policy with no bounded period
+is meaningless), and `--gate spacebar` with `--policy threshold` is
+rejected (the threshold policy consumes no periods, so the gate would
+be silently ignored). When a gate is configured, it is constructed
+after config resolution and **before** the model load and microphone
+open (piped stdin therefore fails before any device is touched),
+passed to `resolve_policy(..., gate=gate, period_s=cfg.gate_period_s)`,
+and closed in a `try/finally` around `runner.run()` (the `atexit`
+registration inside `SpacebarGate` is only the backstop for failure
+paths before the `try`). The startup banner reports the gate:
+`listening gate: none`, or, with a gate,
+`listening gate: spacebar (press SPACE to open a 5.0 s listening
+period)` -- the as-shipped wording prints the float followed by a space
+and `s`, so `--gate-period 10` prints `10.0 s`.
+
+### The `--log-periods` digest (stderr; stdout JSONL untouched)
+
+The middle verbosity between "triggers only" and `--log-all-windows`:
+one line per *period lifecycle event*, human-readable on **stderr**
+(stdout stays pure JSONL for machine consumers), with
+`--log-all-windows` unchanged as the full-verbosity option. `--log-
+periods` (argparse dest `log_periods`, `store_true`, default `False`
+off the `log_periods` config field) requires no new cross-validation:
+the existing gate/policy pair rules mean a gate exists exactly when a
+period lifecycle exists, and the flag is a silent no-op on
+`--policy threshold --gate none`.
+
+When enabled, `main()` wraps the constructed gate in a pass-through
+(`__main__._RunEndGateLogger`) and passes its printer
+(`__main__._print_period_event`) to the policy via
+`resolve_policy(..., on_period_event=...)`. The policy emits the
+lifecycle events -- it observes the same gate states the gate produces
+internally, at the same `samples_seen`, so the digest loses no
+transitions:
+
+- `open` at a press, `reopened` at a mid-period re-press (the
+  discard-and-restart, section 4), `closed` at the flush carrying the
+  period's consolidated `PolicyDecision` (the accept/reject reason,
+  section 5's formats, with the `mode_period: ` prefix stripped).
+- A press landing on the exact flush stride (section 4's edge) prints
+  the `closed` line for the period that ended and then the `open` line
+  for the one that starts, at the same `t`.
+
+As-shipped line formats (`__main__._print_period_event`):
+
+```
+gate: open      t=12.30s
+gate: reopened  t=15.10s
+gate: closed    t=17.30s  period: ACCEPT  intent='TIME' mean confidence 0.87 >= threshold 0.7 over 8 obs
+gate: closed    t=27.10s  period: REJECT  silence dominated the period (None 9/10)
+gate: closed    (run ended)
+```
+
+The last line is the wrapper's: the run ended (Ctrl-C/EOF) with a
+period still open -- the in-flight period is discarded, never flushed,
+so the digest closes the open line instead of ending unbalanced. A run
+whose polls never observed an open period prints nothing (no `open` was
+printed, so nothing to balance). An accepted flush also still emits its
+`"event": "trigger"` JSONL line on stdout exactly as before; the digest
+line is a human echo, and a debouncer-suppressed accept shows up as the
+digest line without a following trigger line (plus the run summary's
+`suppressed` count).
+
+### Product-level integration (still not decided): cold start
 
 > Cold start is non-trivial (`torch`/`torchaudio` imported at module
 > level via `common/features.py`'s `LogMelFeatureExtractor` wrapping
@@ -389,8 +688,16 @@ support):
 - `vcm.decoder.DecodeResult`, `decode`.
 - `vcm.streaming.buffer.RingBuffer`, `vcm.streaming.debounce.Debouncer`,
   `vcm.streaming.policy.{WindowObservation,PolicyDecision,
-  AcceptancePolicy,ThresholdPolicy}` (this feature's own new symbols,
-  Task 01).
+  AcceptancePolicy,ThresholdPolicy,ModePeriodPolicy}` (this feature's
+  own new symbols, Task 01; `ModePeriodPolicy` landed later, with the
+  `mode-period-gate` feature, 2026-09-21).
 - `vcm.streaming.sources.{AudioSource,RawPcmStreamSource,WavFileSource,
   MicrophoneSource,open_microphone_source,MicrophoneUnavailableError,
   DEFAULT_MIC_COMMAND}` (this feature's own new symbols, Task 02).
+- `vcm.streaming.gate.{GateState,ListeningGate,GateUnavailableError,
+  SpacebarGate,GATE_REGISTRY,resolve_gate}` (new module,
+  `mode-period-gate` feature, 2026-09-21; source of truth
+  `vcm/streaming/gate.py`, section 6).
+- `vcm.streaming.config.{StreamingConfig,POLICY_REGISTRY,
+  resolve_policy}` now also carry the `gate`/`gate_period_s` fields and
+  the `mode_period` registry entry (section 2).

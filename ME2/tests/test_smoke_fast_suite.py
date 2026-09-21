@@ -95,6 +95,7 @@ _VCM_MODULES = [
     "me2_voicegen.vcm.slot_eval_set",
     "me2_voicegen.vcm.streaming.buffer",
     "me2_voicegen.vcm.streaming.debounce",
+    "me2_voicegen.vcm.streaming.gate",
     "me2_voicegen.vcm.streaming.policy",
     "me2_voicegen.vcm.streaming.sources",
     "me2_voicegen.vcm.streaming.config",

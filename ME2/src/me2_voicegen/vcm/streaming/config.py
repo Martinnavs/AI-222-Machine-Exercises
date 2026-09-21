@@ -40,7 +40,13 @@ from pathlib import Path
 from typing import Any, Mapping, Optional
 
 from me2_voicegen.vcm.evaluate import GRAMMAR_REGISTRY
-from me2_voicegen.vcm.streaming.policy import AcceptancePolicy, ThresholdPolicy
+from me2_voicegen.vcm.streaming.gate import ListeningGate
+from me2_voicegen.vcm.streaming.policy import (
+    AcceptancePolicy,
+    ModePeriodPolicy,
+    PeriodEventCallback,
+    ThresholdPolicy,
+)
 
 PROJECT_ROOT = Path(__file__).resolve().parents[4]
 
@@ -51,6 +57,7 @@ MODEL_REGISTRY: dict[str, Path] = {
 
 POLICY_REGISTRY: dict[str, type[AcceptancePolicy]] = {
     "threshold": ThresholdPolicy,
+    "mode_period": ModePeriodPolicy,
 }
 
 DEFAULT_GRAMMAR_LABEL = "OPTIONB_GRAMMAR"
@@ -89,11 +96,15 @@ _FIELD_TYPES: dict[str, type] = {
     "mic_command": str,
     "listen_for": float,
     "log_all_windows": bool,
+    "gate": str,
+    "gate_period_s": float,
+    "log_periods": bool,
 }
 
 _FIELD_CHOICES: dict[str, tuple[str, ...]] = {
     "backend": ("onnx", "torch"),
     "onnx_variant": ("fp32", "int8"),
+    "gate": ("none", "spacebar"),
 }
 
 _NULLABLE_FIELDS = frozenset({"threshold", "mic_command", "listen_for"})
@@ -166,6 +177,9 @@ class StreamingConfig:
     mic_command: Optional[str] = None
     listen_for: Optional[float] = None
     log_all_windows: bool = False
+    gate: str = "none"
+    gate_period_s: float = 5.0
+    log_periods: bool = False
 
     @classmethod
     def from_json(cls, path: str | Path) -> "StreamingConfig":
@@ -304,13 +318,30 @@ def resolve_threshold(
         return FALLBACK_THRESHOLD
 
 
-def resolve_policy(name: str, threshold: float) -> AcceptancePolicy:
+def resolve_policy(
+    name: str,
+    threshold: float,
+    *,
+    gate: Optional[ListeningGate] = None,
+    period_s: float = 5.0,
+    on_period_event: Optional[PeriodEventCallback] = None,
+) -> AcceptancePolicy:
     try:
         policy_cls = POLICY_REGISTRY[name]
     except KeyError:
         raise SystemExit(
             f"unknown --policy {name!r}; choices are {sorted(POLICY_REGISTRY)}"
         ) from None
+    if name == "mode_period":
+        if gate is None:
+            raise SystemExit(
+                f"--policy {name!r} requires a listening gate: pass --gate "
+                f"spacebar (with --gate-period for the period length) -- "
+                f"--gate none is not a valid combination with --policy {name!r}"
+            )
+        return policy_cls(
+            threshold, gate=gate, period_s=period_s, on_period_event=on_period_event
+        )
     return policy_cls(threshold)
 
 

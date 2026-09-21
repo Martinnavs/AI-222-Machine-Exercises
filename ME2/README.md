@@ -579,6 +579,8 @@ how to run it, and the risks/limitations stated plainly.
 ```bash
 make stream                                    # live mic, optionc preset, ONNX fp32
 make stream STREAM_SOURCE=path/to/clip.wav     # deterministic file replay instead
+make stream STREAM_ARGS="--policy mode_period --gate spacebar"      # gated run: SPACE opens a 5.0 s listening period
+make stream STREAM_ARGS="--policy mode_period --gate spacebar --gate-period 10"
 ```
 
 or directly:
@@ -586,6 +588,7 @@ or directly:
 ```bash
 uv run python -m me2_voicegen.vcm.streaming
 uv run python -m me2_voicegen.vcm.streaming --source path/to/clip.wav
+uv run python -m me2_voicegen.vcm.streaming --policy mode_period --gate spacebar --gate-period 10
 ```
 
 With no arguments, it opens the live microphone, loads the `optionc` checkpoint preset (the
@@ -593,9 +596,74 @@ With no arguments, it opens the live microphone, loads the `optionc` checkpoint 
 "VCM toy" section above), and runs inference through the ONNX fp32 backend. It runs
 continuously, printing one JSONL object per detected, non-suppressed command on stdout and a
 startup banner (checkpoint/run dir, preset, backend, grammar, window/stride/refractory/beam,
-resolved threshold, license) on stderr, until source EOF (file replay), `Ctrl-C`, or
-`--listen-for <seconds>` expires — all three exit 0 with a summary line
+resolved threshold, listening gate, license) on stderr, until source EOF (file replay), `Ctrl-C`,
+or `--listen-for <seconds>` expires — all three exit 0 with a summary line
 (`windows`/`events`/`suppressed`/`dropped`).
+
+### Gated runs: one consolidated event per listening period
+
+The default run (`--policy threshold --gate none`) is the original per-window behavior,
+unchanged. A **gated run** pairs the new `mode_period` policy with the new spacebar
+listening gate:
+
+```bash
+make stream STREAM_ARGS="--policy mode_period --gate spacebar"
+make stream STREAM_ARGS="--policy mode_period --gate spacebar --gate-period 10"
+```
+
+In a gated run, press **SPACE** on the terminal to open a bounded listening period
+(default 5.0 s; `--gate-period <seconds>` to change it). Every window evaluated while the
+period is open is collected, and at the period's end the runner emits **at most one**
+consolidated event for the whole period: the **mode** (most frequent `(intent, slots)`
+decode) across the period, accepted only if that decode class's *mean* confidence clears the
+resolved threshold (ties break by count, then confidence sum, then first-seen order —
+deterministic). Pressing SPACE again mid-period discards everything collected so far and
+starts a fresh period from that press. While no period is open, **nothing is accepted,
+no matter how confident a decode is** — a gate-closed window is rejected outright. The
+startup banner tells you which mode you're in: `listening gate: none`, or
+`listening gate: spacebar (press SPACE to open a 5.0 s listening period)`.
+
+Add `--log-periods` to a gated run for a per-period digest on stderr: one line when a
+period opens (or is restarted by a re-press), and one line at the period's end carrying
+the consolidated result — including periods that produced *no* trigger, which are
+otherwise invisible:
+
+```
+gate: open      t=12.30s
+gate: closed    t=17.30s  period: REJECT  silence dominated the period (None 9/10)
+```
+
+The JSONL on stdout is unchanged (an accepted period still emits its `"event": "trigger"`
+line); `--log-all-windows` remains the full per-window verbosity.
+
+Gated runs are intended for the live microphone: file replay is lockstep (it runs faster
+than real time), so keypress timing against the audio stream is unreliable.
+
+Two flag combinations are hard errors (exit 1 with an actionable message, before any model
+load or microphone open, never a traceback): `--policy mode_period` without a gate, and
+`--gate spacebar` with `--policy threshold` — the gate and the policy are only useful
+together, and a silently ignored flag would be a trap. `--gate spacebar` also fails fast
+(exit 1, actionable message: run in an interactive shell, pass `--gate none`, or replay a
+file with `--source <wav>`) when stdin isn't a real terminal, e.g. piped or CI runs. Ctrl-C
+still works mid-run (raw mode keeps signal handling), and the terminal is restored on every
+exit path — clean, Ctrl-C, or error.
+
+**How this mitigates the two failure modes observed on real hardware (above):**
+
+- **Lingering duplicate triggers** — a phrase that decodes correctly across roughly ten
+  consecutive windows as it slides through the 2.5 s window used to fire twice, once the
+  1.5 s refractory expired. In a gated run one period produces at most one accept, so the
+  near-identical decodes collapse into the single mode decision; the `Debouncer` still
+  independently rate-limits consecutive *periods* as before.
+- **Ambient false positives** — the spurious `TIME` triggers observed in the "Known risk"
+  section below came from confident-but-wrong decodes with nobody speaking. In a gated run,
+  gate-closed windows are rejected before any threshold arithmetic, so ambient noise cannot
+  trigger at all; inside a period, noise must additionally be the *most frequent* decode
+  class across the whole period *and* clear the threshold on its class's mean confidence,
+  which intermittent noise cannot do.
+
+The full contract (gate state machine, the policy's flush/tie-break rules, decision reason
+formats) is in [`docs/STREAMING-CONTRACT.md`](docs/STREAMING-CONTRACT.md) sections 4 and 6.
 
 ### Mic-primary design and prerequisites
 

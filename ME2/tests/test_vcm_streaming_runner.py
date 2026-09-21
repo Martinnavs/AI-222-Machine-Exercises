@@ -9,9 +9,13 @@ checkpoint, `.onnx` artifact, or microphone. The two real-artifact checks
 
 from __future__ import annotations
 
+import dataclasses
 import io
+import inspect
+import json
 import math
 from pathlib import Path
+from typing import Optional
 
 import numpy as np
 import pytest
@@ -25,8 +29,9 @@ from me2_voicegen.vcm.optionb import OPTIONB_GRAMMAR
 from me2_voicegen.vcm.pipeline import logp_for_waveform
 from me2_voicegen.vcm.streaming.backends import OnnxBackend, TorchBackend
 from me2_voicegen.vcm.streaming.config import resolve_grammar, resolve_threshold
-from me2_voicegen.vcm.streaming.policy import ThresholdPolicy
-from me2_voicegen.vcm.streaming.runner import StreamingRunner
+from me2_voicegen.vcm.streaming.gate import GateState
+from me2_voicegen.vcm.streaming.policy import ModePeriodPolicy, ThresholdPolicy
+from me2_voicegen.vcm.streaming.runner import StreamingRunner, TriggerEvent
 from me2_voicegen.vcm.streaming.sources import WavFileSource
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -171,6 +176,47 @@ class _SlowBackend:
 
         time.sleep(self._sleep_s)
         return self._logp
+
+
+class _SequenceLogpBackend:
+    """Returns precomputed `(T, 29)` log-prob arrays in call order, cycling
+    the last one -- models a window whose decode changes over time (needed
+    to prove the policy's authoritative result overrides the flush window's
+    own decode)."""
+
+    def __init__(self, logp_sequence: list[np.ndarray]) -> None:
+        self._sequence = logp_sequence
+        self._calls = 0
+
+    def logp_for_waveform(self, waveform: np.ndarray) -> np.ndarray:
+        logp = self._sequence[min(self._calls, len(self._sequence) - 1)]
+        self._calls += 1
+        return logp
+
+
+class _ScriptedFakeGate:
+    """Deterministic `ListeningGate` for runner/CLI tests: open at
+    `open_at` for `period_s` (auto-closing at the period end, like
+    `SpacebarGate`), recording the waveforms handed to `poll()` and
+    `close()` calls. No TTY, no timing."""
+
+    def __init__(self, open_at: Optional[int], period_s: float) -> None:
+        self.open_at = open_at
+        self.period_samples = int(period_s * SAMPLE_RATE)
+        self.poll_waveforms: list = []
+        self.close_calls = 0
+
+    def poll(self, samples_seen: int, window=None) -> GateState:
+        self.poll_waveforms.append(window)
+        if (
+            self.open_at is not None
+            and self.open_at <= samples_seen < self.open_at + self.period_samples
+        ):
+            return GateState(is_open=True, open_at_samples=self.open_at)
+        return GateState(is_open=False, open_at_samples=None)
+
+    def close(self) -> None:
+        self.close_calls += 1
 
 
 def _forced_ids(phrase: str, repeat: int = 3, pad_to: int = 200) -> list[int]:
@@ -620,7 +666,162 @@ def test_decode_at_inf_plus_policy_equivalent_to_direct_threshold_decode(vcm_stu
 
 
 # ---------------------------------------------------------------------------
-# CLI: lazy mic construction, mic-unavailable error, startup banner.
+# Mode-period policy through the full runner (SPEC Proof 4): the ~6-line
+# `_evaluate_window` diff (approved deviation 1) must carry the policy's
+# authoritative result into the emitted event without changing the JSONL
+# schema or `StreamingRunner.__init__`.
+# ---------------------------------------------------------------------------
+
+PHRASE_B = "volume up"
+
+
+def test_streaming_runner_init_signature_unchanged_by_mode_period_wiring():
+    # Approved deviation 1 confines the runner change to `_evaluate_window`:
+    # a gate-aware policy goes in through the existing `policy` parameter,
+    # so this signature stays exactly as it was.
+    params = list(inspect.signature(StreamingRunner.__init__).parameters)
+    assert params == [
+        "self",
+        "source",
+        "backend",
+        "grammar",
+        "policy",
+        "window_s",
+        "stride_s",
+        "refractory_s",
+        "beam_width",
+        "listen_for_s",
+        "log_all_windows",
+        "out",
+        "summary_out",
+        "poll_interval_s",
+    ]
+
+
+def test_mode_period_policy_emits_one_consolidated_event_overriding_flush_window():
+    """Full runner + fake source + scripted fake gate + real
+    `ModePeriodPolicy`: four windows decode PHRASE A (two each at two
+    confidence levels) and one decodes PHRASE B inside a gate period; the
+    flush window decodes PHRASE B itself. The single emitted event must
+    carry PHRASE A (the mode) -- not the flush window's own decode -- with
+    the mean confidence and the flush observation's window_index/t_seconds."""
+    stride_s = 0.25
+    stride_samples = int(round(stride_s * SAMPLE_RATE))
+    open_at = stride_samples  # first evaluated stride
+    period_s = 1.25
+    close_at = open_at + int(period_s * SAMPLE_RATE)
+    total_samples = close_at + 2 * stride_samples  # 8 evaluated windows
+    samples = np.arange(total_samples, dtype=np.float32)
+
+    logp_a_high = _one_hot_logp(_forced_ids(TARGET_PHRASE, repeat=3, pad_to=200), peak=12.0)
+    logp_a_low = _one_hot_logp(_forced_ids(TARGET_PHRASE, repeat=3, pad_to=200), peak=8.0)
+    logp_b = _one_hot_logp(_forced_ids(PHRASE_B, repeat=3, pad_to=200), peak=12.0)
+    backend = _SequenceLogpBackend(
+        [logp_a_high, logp_a_high, logp_a_low, logp_a_low, logp_b, logp_b]
+    )
+
+    gate = _ScriptedFakeGate(open_at=open_at, period_s=period_s)
+    policy = ModePeriodPolicy(threshold=-1e6, gate=gate, period_s=period_s)
+
+    runner = StreamingRunner(
+        source=_ArrayAudioSource(samples, block_samples=stride_samples),
+        backend=backend,
+        grammar=OPTIONB_GRAMMAR,
+        policy=policy,
+        window_s=1.0,
+        stride_s=stride_s,
+        refractory_s=0.0,
+        beam_width=25,
+        out=io.StringIO(),
+    )
+    summary = runner.run()
+
+    assert summary.exit_reason == "source_eof"
+    assert summary.windows == total_samples // stride_samples
+    assert summary.events == 1
+    assert summary.suppressed == 0
+    assert len(runner.triggers) == 1
+
+    result_a_high = decode(logp_a_high, OPTIONB_GRAMMAR, threshold=NEG_INF, beam_width=25)
+    result_a_low = decode(logp_a_low, OPTIONB_GRAMMAR, threshold=NEG_INF, beam_width=25)
+    result_b = decode(logp_b, OPTIONB_GRAMMAR, threshold=NEG_INF, beam_width=25)
+    assert result_a_high.intent is not None
+    assert result_b.intent is not None
+    assert result_a_high.intent != result_b.intent
+
+    event = runner.triggers[0]
+    # The mode (PHRASE A) overrides the flush window's own decode (PHRASE B).
+    assert event.intent == result_a_high.intent
+    assert event.intent != result_b.intent
+    assert event.slots == result_a_high.slots
+    assert event.text == result_a_high.text
+    # Mean confidence across the four mode-class obs -- neither the latest
+    # mode obs's own confidence nor the flush window's.
+    assert event.confidence == pytest.approx(
+        (result_a_high.confidence + result_a_low.confidence) / 2
+    )
+    # Flush observation's position, not the mode obs'.
+    assert event.window_index == close_at // stride_samples
+    assert event.t_seconds == pytest.approx(close_at / SAMPLE_RATE)
+    assert event.policy_reason.startswith("mode_period:")
+    assert "4 obs" in event.policy_reason
+
+    # The window audio actually reached the gate (SPEC's audio-carrying
+    # seam): the ring-buffer snapshot, never None.
+    assert len(gate.poll_waveforms) == summary.windows
+    assert np.array_equal(gate.poll_waveforms[0], samples[:stride_samples])
+    assert all(isinstance(w, np.ndarray) and w.size > 0 for w in gate.poll_waveforms)
+
+
+def test_jsonl_payload_key_set_unchanged():
+    # No new JSONL fields (SPEC contract section 5): every record's key set
+    # is exactly the pre-feature schema, 'window' and 'trigger' alike.
+    source = _ArrayAudioSource(np.zeros(24000, dtype=np.float32), block_samples=4000)
+    out = io.StringIO()
+    StreamingRunner(
+        source=source,
+        backend=_fixed_target_phrase_backend(),
+        grammar=OPTIONB_GRAMMAR,
+        policy=ThresholdPolicy(threshold=-1e6),
+        window_s=1.0,
+        stride_s=0.25,
+        refractory_s=1.5,
+        beam_width=25,
+        log_all_windows=True,
+        out=out,
+    ).run()
+
+    expected_keys = frozenset(
+        (
+            "event",
+            "t_seconds",
+            "window_index",
+            "intent",
+            "slots",
+            "text",
+            "confidence",
+            "policy_reason",
+        )
+    )
+    # The TriggerEvent dataclass and the JSONL payload must stay in lockstep.
+    assert frozenset(f.name for f in dataclasses.fields(TriggerEvent)) == expected_keys
+
+    lines = out.getvalue().strip().splitlines()
+    assert [json.loads(line)["event"] for line in lines] == [
+        "trigger",
+        "window",
+        "window",
+        "window",
+        "window",
+        "window",
+    ]
+    for line in lines:
+        assert set(json.loads(line)) == expected_keys
+
+
+# ---------------------------------------------------------------------------
+# CLI: lazy mic construction, mic-unavailable error, startup banner,
+# gate flags / cross-validation / gate lifecycle.
 # ---------------------------------------------------------------------------
 
 
@@ -698,6 +899,191 @@ def test_cli_startup_banner_reports_all_required_fields():
     assert f"beam_width={cfg.beam_width}" in banner
     assert "-0.1" in banner  # resolved threshold
     assert "CC-BY-NC-SA-4.0" in banner
+
+
+def test_cli_banner_reports_listening_gate():
+    import me2_voicegen.vcm.streaming.__main__ as main_mod
+    from me2_voicegen.vcm.streaming.config import StreamingConfig
+
+    def banner_for(cfg) -> str:
+        out = io.StringIO()
+        main_mod._print_banner(
+            cfg,
+            model_path=Path("out/vcm/optionb-optionc/export/vcm_model.fp32.onnx"),
+            run_dir=Path("out/vcm/optionb-optionc"),
+            threshold=-0.1,
+            grammar_label="OPTIONB_GRAMMAR",
+            out=out,
+        )
+        return out.getvalue()
+
+    assert "listening gate: none" in banner_for(StreamingConfig())
+
+    banner = banner_for(StreamingConfig(gate="spacebar", gate_period_s=7.5))
+    assert (
+        "listening gate: spacebar (press SPACE to open a 7.5 s listening period)"
+        in banner
+    )
+
+
+def test_cli_help_lists_gate_flags(capsys):
+    import me2_voicegen.vcm.streaming.__main__ as main_mod
+
+    with pytest.raises(SystemExit) as exc_info:
+        main_mod.build_arg_parser().parse_args(["--help"])
+    assert exc_info.value.code == 0
+    help_text = capsys.readouterr().out
+    assert "--gate" in help_text
+    assert "--gate-period" in help_text
+
+
+def test_cli_mode_policy_with_none_gate_fails_fast_before_side_effects(monkeypatch):
+    import me2_voicegen.vcm.streaming.__main__ as main_mod
+
+    def _boom(*args, **kwargs):
+        raise AssertionError(
+            "--policy mode_period with --gate none must be rejected before "
+            "gate construction and before the microphone opens"
+        )
+
+    monkeypatch.setattr(main_mod, "resolve_gate", _boom)
+    monkeypatch.setattr(main_mod, "open_microphone_source", _boom)
+
+    with pytest.raises(SystemExit) as exc_info:
+        main_mod.main(["--policy", "mode_period"])
+
+    message = str(exc_info.value)
+    assert "--gate spacebar" in message
+    assert "--gate none" in message
+
+
+def test_cli_spacebar_gate_with_threshold_policy_fails_fast_before_side_effects(monkeypatch):
+    import me2_voicegen.vcm.streaming.__main__ as main_mod
+
+    def _boom(*args, **kwargs):
+        raise AssertionError(
+            "--gate spacebar with --policy threshold must be rejected before "
+            "gate construction and before the microphone opens"
+        )
+
+    monkeypatch.setattr(main_mod, "resolve_gate", _boom)
+    monkeypatch.setattr(main_mod, "open_microphone_source", _boom)
+
+    with pytest.raises(SystemExit) as exc_info:
+        main_mod.main(["--gate", "spacebar"])
+
+    message = str(exc_info.value)
+    assert "--policy mode_period" in message
+    assert "--gate none" in message
+
+
+def test_cli_gate_unavailable_raises_actionable_systemexit_not_traceback(monkeypatch):
+    import me2_voicegen.vcm.streaming.__main__ as main_mod
+    from me2_voicegen.vcm.streaming.gate import GateUnavailableError
+
+    def _boom(*args, **kwargs):
+        raise AssertionError("gate construction must fail before the microphone opens")
+
+    monkeypatch.setattr(main_mod, "open_microphone_source", _boom)
+
+    def _raise_unavailable(*args, **kwargs):
+        raise GateUnavailableError(
+            "stdin is not a usable TTY, so the spacebar listening gate cannot "
+            "read keypresses. Run in an interactive shell, pass --gate none, "
+            "or replay a file with --source <wav>."
+        )
+
+    monkeypatch.setattr(main_mod, "resolve_gate", _raise_unavailable)
+
+    with pytest.raises(SystemExit) as exc_info:
+        main_mod.main(["--policy", "mode_period", "--gate", "spacebar"])
+
+    message = str(exc_info.value)
+    assert "--gate none" in message
+    assert "--source" in message
+
+
+def _capture_runner_summaries(monkeypatch):
+    import me2_voicegen.vcm.streaming.__main__ as main_mod
+
+    # Wrap the real `StreamingRunner` to record the `RunSummary` each
+    # `main()` run returns: the summary line is printed to a stderr file
+    # object bound at import time, which this environment's capture
+    # plumbing does not expose to capsys/capfd.
+    real_cls = main_mod.StreamingRunner
+    summaries: list = []
+
+    def _factory(*args, **kwargs):
+        runner = real_cls(*args, **kwargs)
+        original_run = runner.run
+
+        def _run():
+            summary = original_run()
+            summaries.append(summary)
+            return summary
+
+        runner.run = _run
+        return runner
+
+    monkeypatch.setattr(main_mod, "StreamingRunner", _factory)
+    return summaries
+
+
+def test_cli_gate_closed_when_run_completes_cleanly(monkeypatch, tmp_path):
+    import me2_voicegen.vcm.streaming.__main__ as main_mod
+
+    gate = _ScriptedFakeGate(open_at=0, period_s=5.0)
+    monkeypatch.setattr(main_mod, "resolve_gate", lambda *a, **k: gate)
+    monkeypatch.setattr(main_mod, "resolve_model", lambda *a, **k: Path("/fake/model.onnx"))
+    monkeypatch.setattr(
+        main_mod,
+        "OnnxBackend",
+        lambda *a, **k: _FixedLogpBackend(_one_hot_logp([alphabet.BLANK_ID] * 5)),
+    )
+    summaries = _capture_runner_summaries(monkeypatch)
+
+    wav_path = tmp_path / "clip.wav"
+    _write_sine_wav(wav_path, duration_s=0.5)
+
+    main_mod.main(
+        [
+            "--policy", "mode_period",
+            "--gate", "spacebar",
+            "--threshold", "-0.1",
+            "--source", str(wav_path),
+        ]
+    )
+
+    assert [s.exit_reason for s in summaries] == ["source_eof"]
+    assert gate.close_calls == 1
+
+
+def test_cli_gate_closed_when_run_keyboard_interrupted(monkeypatch):
+    import me2_voicegen.vcm.streaming.__main__ as main_mod
+
+    gate = _ScriptedFakeGate(open_at=0, period_s=5.0)
+    monkeypatch.setattr(main_mod, "resolve_gate", lambda *a, **k: gate)
+    monkeypatch.setattr(main_mod, "resolve_model", lambda *a, **k: Path("/fake/model.onnx"))
+    monkeypatch.setattr(
+        main_mod,
+        "OnnxBackend",
+        lambda *a, **k: _FixedLogpBackend(_one_hot_logp([alphabet.BLANK_ID] * 5)),
+    )
+    summaries = _capture_runner_summaries(monkeypatch)
+
+    def _interrupting_source(*args, **kwargs):
+        source = _RaisingAudioSource(KeyboardInterrupt(), n_ok_blocks=2, block_samples=4000)
+        source.is_realtime = False
+        return source
+
+    monkeypatch.setattr(main_mod, "open_microphone_source", _interrupting_source)
+
+    main_mod.main(
+        ["--policy", "mode_period", "--gate", "spacebar", "--threshold", "-0.1"]
+    )  # must not raise
+
+    assert [s.exit_reason for s in summaries] == ["keyboard_interrupt"]
+    assert gate.close_calls == 1
 
 
 # ---------------------------------------------------------------------------
@@ -803,3 +1189,223 @@ def test_torch_and_onnx_backends_produce_same_intent_slots_on_same_wav(tmp_path)
     onnx_logp = logp_by_backend["onnx"]
     assert torch_logp.shape == onnx_logp.shape
     np.testing.assert_allclose(torch_logp, onnx_logp, atol=1e-3, rtol=1e-3)
+
+
+# ---------------------------------------------------------------------------
+# CLI: --log-periods digest (printer format, run-end logger, main() wiring).
+# ---------------------------------------------------------------------------
+
+
+def test_log_periods_printer_formats_all_digest_lines():
+    import me2_voicegen.vcm.streaming.__main__ as main_mod
+    from me2_voicegen.vcm.streaming.policy import PolicyDecision
+
+    out = io.StringIO()
+    main_mod._print_period_event("open", 2 * SAMPLE_RATE, None, out=out)
+    main_mod._print_period_event("reopened", 3 * SAMPLE_RATE, None, out=out)
+    accept = PolicyDecision(
+        accept=True,
+        reason=(
+            "mode_period: intent='TIME' mean confidence 0.87 "
+            ">= threshold 0.7 over 8 obs"
+        ),
+    )
+    main_mod._print_period_event("closed", 5 * SAMPLE_RATE, accept, out=out)
+    reject = PolicyDecision(
+        accept=False,
+        reason="mode_period: silence dominated the period (None 9/10)",
+    )
+    main_mod._print_period_event("closed", 7 * SAMPLE_RATE, reject, out=out)
+    main_mod._print_period_event("run_ended", None, None, out=out)
+
+    assert out.getvalue().splitlines() == [
+        "gate: open      t=2.00s",
+        "gate: reopened  t=3.00s",
+        "gate: closed    t=5.00s  period: ACCEPT  intent='TIME' "
+        "mean confidence 0.87 >= threshold 0.7 over 8 obs",
+        "gate: closed    t=7.00s  period: REJECT  "
+        "silence dominated the period (None 9/10)",
+        "gate: closed    (run ended)",
+    ]
+
+
+def test_run_end_gate_logger_prints_only_when_a_period_was_open():
+    import me2_voicegen.vcm.streaming.__main__ as main_mod
+
+    class _ScriptedInnerGate:
+        def __init__(self, open_states):
+            self._states = list(open_states)
+            self.windows = []
+            self.close_calls = 0
+
+        def poll(self, samples_seen, window=None):
+            self.windows.append(window)
+            is_open = self._states.pop(0)
+            return GateState(is_open=is_open, open_at_samples=0 if is_open else None)
+
+        def close(self):
+            self.close_calls += 1
+
+    # period already closed before the run ends: no digest line
+    inner = _ScriptedInnerGate([True, False])
+    out = io.StringIO()
+    logger = main_mod._RunEndGateLogger(inner, out=out)
+    wave = np.zeros(16, dtype=np.float32)
+    assert logger.poll(0, window=wave).is_open is True
+    assert logger.poll(1).is_open is False
+    assert inner.windows == [wave, None]  # waveform passes through untouched
+    logger.close()
+    assert out.getvalue() == ""
+    assert inner.close_calls == 1
+
+    # run ends with the period still open: balanced with a close line
+    inner2 = _ScriptedInnerGate([False, True])
+    out2 = io.StringIO()
+    logger2 = main_mod._RunEndGateLogger(inner2, out=out2)
+    logger2.poll(0)
+    logger2.poll(1)
+    logger2.close()
+    assert out2.getvalue().splitlines() == ["gate: closed    (run ended)"]
+    assert inner2.close_calls == 1
+
+    # a run that never polled an open period stays silent (no open was
+    # ever printed, so nothing to balance)
+    inner3 = _ScriptedInnerGate([False])
+    out3 = io.StringIO()
+    logger3 = main_mod._RunEndGateLogger(inner3, out=out3)
+    logger3.poll(0)
+    logger3.close()
+    assert out3.getvalue() == ""
+
+
+def _log_periods_cli_setup(monkeypatch, tmp_path, duration_s, gate_period_s, extra_argv):
+    """Drive `main()` against a wav replay with a scripted gate (open from
+    t=0) and a captured `_print_period_event`; returns
+    (events, gate, summaries)."""
+    import me2_voicegen.vcm.streaming.__main__ as main_mod
+
+    gate = _ScriptedFakeGate(open_at=0, period_s=gate_period_s)
+    monkeypatch.setattr(main_mod, "resolve_gate", lambda *a, **k: gate)
+    monkeypatch.setattr(main_mod, "resolve_model", lambda *a, **k: Path("/fake/model.onnx"))
+    monkeypatch.setattr(
+        main_mod,
+        "OnnxBackend",
+        lambda *a, **k: _FixedLogpBackend(_one_hot_logp([alphabet.BLANK_ID] * 5)),
+    )
+    events: list = []
+
+    def _capture(event, samples_seen, decision, out=None):
+        events.append((event, samples_seen, decision))
+
+    monkeypatch.setattr(main_mod, "_print_period_event", _capture)
+    summaries = _capture_runner_summaries(monkeypatch)
+
+    wav_path = tmp_path / "clip.wav"
+    _write_sine_wav(wav_path, duration_s=duration_s)
+
+    main_mod.main(
+        [
+            "--policy", "mode_period",
+            "--gate", "spacebar",
+            "--threshold", "-0.1",
+            "--window-s", "0.5",
+            "--stride-s", "0.25",
+            "--source", str(wav_path),
+        ]
+        + [str(item) for item in extra_argv]
+    )
+    return events, gate, summaries
+
+
+def test_cli_log_periods_wires_digest_events_through_main(monkeypatch, tmp_path):
+    events, gate, summaries = _log_periods_cli_setup(
+        monkeypatch,
+        tmp_path,
+        duration_s=2.0,
+        gate_period_s=1.0,
+        extra_argv=["--gate-period", "1.0", "--log-periods"],
+    )
+
+    # window_s=0.5/stride_s=0.25 -> lockstep evaluations at 4000, 8000, ...;
+    # the 1.0 s period [0, 16000) collects the 4000/8000/12000 observations
+    # and flushes at the first evaluation >= 16000 (all BLANK decodes).
+    assert [event for event, _, _ in events] == ["open", "closed"]
+    assert events[0][1] == 4000 and events[0][2] is None
+    assert events[1][1] == 16000
+    assert events[1][2].accept is False
+    assert "silence dominated the period (None 3/3)" in events[1][2].reason
+    assert [s.exit_reason for s in summaries] == ["source_eof"]
+    assert gate.close_calls == 1
+
+
+def test_cli_log_periods_reports_run_ended_when_period_still_open(monkeypatch, tmp_path):
+    events, gate, summaries = _log_periods_cli_setup(
+        monkeypatch,
+        tmp_path,
+        duration_s=2.0,
+        gate_period_s=5.0,
+        extra_argv=["--log-periods"],
+    )
+
+    # the 5.0 s period outlives the 2.0 s file: the in-flight period is
+    # discarded (never flushed) and the digest balances the open line.
+    assert [event for event, _, _ in events] == ["open", "run_ended"]
+    assert events[0][1] == 4000
+    assert events[1] == ("run_ended", None, None)
+    assert [s.exit_reason for s in summaries] == ["source_eof"]
+    assert gate.close_calls == 1
+
+
+def test_cli_without_log_periods_builds_no_logger_and_emits_no_events(monkeypatch, tmp_path):
+    import me2_voicegen.vcm.streaming.__main__ as main_mod
+
+    def _boom(*args, **kwargs):
+        raise AssertionError("digest plumbing must stay inert without --log-periods")
+
+    monkeypatch.setattr(main_mod, "_print_period_event", _boom)
+    monkeypatch.setattr(main_mod, "_RunEndGateLogger", _boom)
+
+    events, gate, summaries = _log_periods_cli_setup(
+        monkeypatch,
+        tmp_path,
+        duration_s=2.0,
+        gate_period_s=1.0,
+        extra_argv=["--gate-period", "1.0"],
+    )
+
+    assert events == []
+    assert [s.exit_reason for s in summaries] == ["source_eof"]
+    assert gate.close_calls == 1  # the raw gate closed, no wrapper around it
+
+
+def test_cli_help_lists_log_periods_flag(capsys):
+    import me2_voicegen.vcm.streaming.__main__ as main_mod
+
+    with pytest.raises(SystemExit) as exc_info:
+        main_mod.build_arg_parser().parse_args(["--help"])
+    assert exc_info.value.code == 0
+    help_text = capsys.readouterr().out
+    assert "--log-periods" in help_text
+
+
+def test_cli_banner_reports_log_periods_when_enabled():
+    import me2_voicegen.vcm.streaming.__main__ as main_mod
+    from me2_voicegen.vcm.streaming.config import StreamingConfig
+
+    def banner_for(cfg) -> str:
+        out = io.StringIO()
+        main_mod._print_banner(
+            cfg,
+            model_path=Path("out/vcm/optionb-optionc/export/vcm_model.fp32.onnx"),
+            run_dir=Path("out/vcm/optionb-optionc"),
+            threshold=-0.1,
+            grammar_label="OPTIONB_GRAMMAR",
+            out=out,
+        )
+        return out.getvalue()
+
+    assert "--log-periods" not in banner_for(StreamingConfig())
+    assert (
+        "logging: per-period digest on stderr (--log-periods)"
+        in banner_for(StreamingConfig(log_periods=True))
+    )

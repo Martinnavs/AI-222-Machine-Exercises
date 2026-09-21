@@ -28,6 +28,13 @@ from me2_voicegen.vcm.streaming.config import (
     resolve_policy,
     resolve_threshold,
 )
+from me2_voicegen.vcm.streaming.gate import (
+    GateState,
+    GateUnavailableError,
+    ListeningGate,
+    resolve_gate,
+)
+from me2_voicegen.vcm.streaming.policy import PolicyDecision
 from me2_voicegen.vcm.streaming.runner import StreamingRunner
 from me2_voicegen.vcm.streaming.sources import (
     DEFAULT_MIC_COMMAND,
@@ -86,11 +93,69 @@ def build_arg_parser() -> argparse.ArgumentParser:
         default=None,
         help="emit a JSONL 'window' record for every evaluated window, not just triggers",
     )
+    parser.add_argument(
+        "--log-periods",
+        dest="log_periods",
+        action="store_true",
+        default=None,
+        help="print a per-period digest to stderr: gate open/close lines plus "
+        "the period's consolidated result (rejected periods included) -- the "
+        "JSONL on stdout is unchanged; use --log-all-windows for every window",
+    )
+    parser.add_argument("--gate", type=str, default=None, choices=["none", "spacebar"])
+    parser.add_argument("--gate-period", dest="gate_period_s", type=float, default=None)
     return parser
 
 
 def _cli_overrides(args: argparse.Namespace) -> dict:
     return {name: getattr(args, name) for name in _CONFIG_FIELD_NAMES if hasattr(args, name)}
+
+
+def _print_period_event(
+    event: str,
+    samples_seen: Optional[int],
+    decision: Optional[PolicyDecision],
+    out: object = sys.stderr,
+) -> None:
+    """One `--log-periods` digest line (stderr only -- the JSONL on stdout
+    is untouched): the gate lifecycle plus the period's consolidated
+    result. `event` is "open"/"reopened" (samples_seen set, decision
+    None), "closed" (the flush -- decision set), or "run_ended" (the run
+    stopped with a period still open: the in-flight period is discarded,
+    never flushed)."""
+    if event == "run_ended":
+        print("gate: closed    (run ended)", file=out)
+        return
+    t = f"t={samples_seen / SAMPLE_RATE:.2f}s"
+    if event == "closed":
+        verdict = "ACCEPT" if decision.accept else "REJECT"
+        reason = decision.reason.removeprefix("mode_period: ")
+        print(f"gate: closed    {t}  period: {verdict}  {reason}", file=out)
+    else:  # "open" | "reopened"
+        print(f"gate: {event:<9} {t}", file=out)
+
+
+class _RunEndGateLogger:
+    """`ListeningGate` pass-through that balances the digest when the run
+    ends with a period still open (Ctrl-C/EOF): the in-flight period is
+    discarded and never flushed, so without this line the digest would
+    end on an unbalanced `gate: open`. A poll that never observed an open
+    period prints nothing, matching the digest (no `open` was printed)."""
+
+    def __init__(self, inner: ListeningGate, out: object = sys.stderr) -> None:
+        self._inner = inner
+        self._out = out
+        self._was_open = False
+
+    def poll(self, samples_seen: int, window=None) -> GateState:
+        state = self._inner.poll(samples_seen, window)
+        self._was_open = state.is_open
+        return state
+
+    def close(self) -> None:
+        if self._was_open:
+            _print_period_event("run_ended", None, None, out=self._out)
+        self._inner.close()
 
 
 def _load_checkpoint_meta(run_dir: Optional[Path]) -> dict:
@@ -115,6 +180,13 @@ def _print_banner(
     meta = _load_checkpoint_meta(run_dir)
     preset = meta.get("preset", cfg.model)
     license_note = meta.get("license", LICENSE_NOTE)
+    if cfg.gate == "none":
+        gate_line = "listening gate: none"
+    else:
+        gate_line = (
+            "listening gate: spacebar "
+            f"(press SPACE to open a {cfg.gate_period_s} s listening period)"
+        )
     lines = [
         "me2_voicegen streaming spoken-command runner",
         f"  checkpoint/run dir: {run_dir if run_dir is not None else model_path}",
@@ -125,7 +197,10 @@ def _print_banner(
         f"refractory_s={cfg.refractory_s} beam_width={cfg.beam_width}",
         f"  resolved threshold: {threshold}",
         f"  license: {license_note}",
+        f"  {gate_line}",
     ]
+    if cfg.log_periods:
+        lines.append("  logging: per-period digest on stderr (--log-periods)")
     for line in lines:
         print(line, file=out)
 
@@ -134,11 +209,43 @@ def main(argv: Optional[list[str]] = None) -> None:
     args = build_arg_parser().parse_args(argv)
     cfg = StreamingConfig.merge(json_path=args.config, cli_overrides=_cli_overrides(args))
 
+    # Hard --gate/--policy cross-validation: both must fire before any side
+    # effect (no model load, no TTY raw mode, no microphone).
+    if cfg.policy == "mode_period" and cfg.gate == "none":
+        raise SystemExit(
+            "--policy mode_period requires a listening gate: pass --gate "
+            "spacebar (with --gate-period for the period length) -- --gate "
+            "none is not a valid combination with --policy mode_period"
+        )
+    if cfg.gate == "spacebar" and cfg.policy != "mode_period":
+        raise SystemExit(
+            "--gate spacebar opens a bounded listening period that only "
+            "--policy mode_period consumes: pass --policy mode_period, or "
+            "use --gate none with --policy threshold"
+        )
+
+    gate: Optional[ListeningGate] = None
+    if cfg.gate != "none":
+        # Fail fast on a non-interactive stdin (piped/CI) before the
+        # microphone is opened -- mirrors MicrophoneUnavailableError.
+        try:
+            gate = resolve_gate(cfg.gate, period_s=cfg.gate_period_s)
+        except GateUnavailableError as exc:
+            raise SystemExit(str(exc)) from None
+        if cfg.log_periods:
+            gate = _RunEndGateLogger(gate)
+
     model_path = resolve_model(cfg.model, cfg.backend, cfg.onnx_variant)
     run_dir = _candidate_run_dir(cfg.model)
     grammar, grammar_label = resolve_grammar(cfg.grammar)
     threshold = resolve_threshold(run_dir, override=cfg.threshold, grammar_label=grammar_label)
-    policy = resolve_policy(cfg.policy, threshold)
+    policy = resolve_policy(
+        cfg.policy,
+        threshold,
+        gate=gate,
+        period_s=cfg.gate_period_s,
+        on_period_event=_print_period_event if cfg.log_periods else None,
+    )
 
     backend: InferenceBackend
     if cfg.backend == "onnx":
@@ -177,7 +284,13 @@ def main(argv: Optional[list[str]] = None) -> None:
         listen_for_s=cfg.listen_for,
         log_all_windows=cfg.log_all_windows,
     )
-    runner.run()
+    try:
+        runner.run()
+    finally:
+        # atexit inside SpacebarGate is only a backstop for failure paths
+        # between construction and this try.
+        if gate is not None:
+            gate.close()
 
 
 if __name__ == "__main__":

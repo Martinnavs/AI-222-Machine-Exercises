@@ -229,22 +229,24 @@ class StreamingRunner:
         result = decode(logp, self.grammar, threshold=NEG_INF, beam_width=self.beam_width)
 
         obs = WindowObservation(
-            window_index=self._window_index, samples_seen=samples_seen, result=result
+            window_index=self._window_index, samples_seen=samples_seen, result=result,
+            waveform=waveform
         )
         decision = self.policy.observe(obs)
+        authoritative = decision.result if decision.result is not None else result
         emitted = self._debouncer.gate(decision.accept)
 
         if not emitted and not self.log_all_windows:
             return
 
-        confidence = None if result.intent is None else result.confidence
+        confidence = None if authoritative.intent is None else authoritative.confidence
         payload = {
             "event": "trigger" if emitted else "window",
             "t_seconds": samples_seen / SAMPLE_RATE,
             "window_index": obs.window_index,
-            "intent": result.intent,
-            "slots": result.slots,
-            "text": result.text,
+            "intent": authoritative.intent,
+            "slots": authoritative.slots,
+            "text": authoritative.text,
             "confidence": confidence,
             "policy_reason": decision.reason,
         }

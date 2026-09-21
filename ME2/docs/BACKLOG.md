@@ -9,12 +9,51 @@ where this repo is cloned, not just the one it was written on.
 ## Mode-across-a-bounded-listening-period `AcceptancePolicy`
 
 **Area:** `me2_voicegen.vcm.streaming`
-**Status:** deferred — blocked on a component that doesn't exist yet
-**Full technical context:** `docs/STREAMING-CONTRACT.md` section 4,
-"A concrete future policy: mode-across-a-bounded-listening-period"
-(has the full rationale, the `AcceptancePolicy`/`WindowObservation`
-protocol this builds on, and why the seam was designed to support this
-without a runner rewrite — read that before starting this).
+**Status:** implemented (2026-09-21, `mode-period-gate` feature) — see
+"Shipped" below; the item text under it is the original deferred
+context, kept for history
+**Full technical context (as shipped):** `docs/STREAMING-CONTRACT.md`
+section 4 ("The mode-across-a-bounded-listening-period policy") for the
+policy and section 6 (the `ListeningGate` seam) for the gate — read
+those; the text below is the pre-implementation item.
+
+### Shipped (2026-09-21)
+
+Built as the `mode-period-gate` feature (confirmed plan
+`ME2/.scratch/mode-period-gate/plan.md`; requirements source
+`/home/bertie/.opencode/plan/mode-period-gate-SPEC.md`; tech-lead review
+approved, `ME2/.scratch/mode-period-gate/review-round-1.md`):
+
+- `ModePeriodPolicy` in `src/me2_voicegen/vcm/streaming/policy.py`,
+  registered as `--policy mode_period` in `POLICY_REGISTRY`: collects
+  every observation across a bounded listening period and flushes one
+  consolidated accept/reject from the mode (most frequent
+  `(intent, slots)` decode), the class's mean confidence vs. the
+  operating threshold, deterministic tie-breaks.
+- The component this item was blocked on, shipped as the abstract
+  `ListeningGate` seam plus concrete `SpacebarGate` in the new
+  `src/me2_voicegen/vcm/streaming/gate.py` (`--gate spacebar` /
+  `--gate-period <s>`); a future wake-word gate satisfies the same
+  protocol with zero policy/runner changes.
+- Both acceptance criteria below are pinned as named tests:
+  `tests/test_vcm_streaming_policy.py::test_backlog_ac1_ten_identical_decodes_collapse_to_single_accept_at_flush`
+  and `::test_backlog_ac2_intermittent_noise_in_mostly_none_period_never_triggers`,
+  plus the cross-cutting runner+gate+policy runs in
+  `tests/test_vcm_streaming_integration.py`.
+- **Approved deviation 1 supersedes this item's "zero diff to
+  `runner.py`" acceptance criterion:** the shipped runner diff is the
+  ~6-line `StreamingRunner._evaluate_window` change (pass `waveform` on
+  the observation; read the payload's intent/slots/text/confidence from
+  `decision.result` when the policy set it, else the window's own
+  result) — a consolidated event must carry a *previous* window's
+  decode, and the gate needs the audio, and both require payload-side
+  handling. `decoder.py`/`debounce.py` stayed byte-identical and
+  `StreamingRunner.__init__` is unchanged, so the seam's purpose
+  (policy swappability without a runner *rewrite*) stands.
+- **Post-approval extension (2026-09-21):** the `--log-periods` per-period
+  stderr digest (gate open/reopened/closed lines plus the period's
+  consolidated result, incl. rejected periods; stdout JSONL untouched) —
+  design note `ME2/.scratch/mode-period-gate/log-periods-extension.md`.
 
 ### Problem (observed directly on real hardware, not hypothetical)
 
@@ -35,8 +74,9 @@ without a runner rewrite — read that before starting this).
 ### Fix
 
 Once a wake-word gate exists and defines a bounded "listening period"
-(see `docs/STREAMING-CONTRACT.md` section 6's forward-compat note — that
-integration is itself undecided and not this ticket's concern), implement
+(see `docs/STREAMING-CONTRACT.md` section 6's product-level-integration
+note — that integration is itself undecided and not this ticket's
+concern), implement
 a new `AcceptancePolicy` in `src/me2_voicegen/vcm/streaming/policy.py`
 that consumes every `WindowObservation` across that period and emits one
 consolidated `TriggerEvent` based on the **mode** (most frequent decode)
@@ -53,22 +93,30 @@ history, but the protocol already does. Implementing this is:
 - **no changes to `runner.py`, `decoder.py`, or `Debouncer`** — that's the
   seam's whole purpose, and it's already proven swappable by
   `tests/test_vcm_streaming_runner.py`'s policy-swappability test.
+  (**Superseded as built** — see "Shipped": approved deviation 1
+  allowed the ~6-line `runner._evaluate_window` diff; `decoder.py` and
+  `Debouncer` did stay untouched.)
 
 ### Acceptance criteria (for whoever picks this up)
 
 - New policy class registered in `POLICY_REGISTRY`, selectable via
-  `--policy`.
+  `--policy`. (Met: `--policy mode_period`.)
 - Zero diff to `runner.py`/`decoder.py`/`debounce.py` to support it.
+  (**Superseded as built by approved deviation 1** — see "Shipped":
+  ~6-line `runner._evaluate_window` diff; `decoder.py`/`debounce.py`
+  did stay zero-diff.)
 - A test proving it resolves both observed failure modes: a synthetic
   multi-window sequence with the same correct decode repeated N times
   (lingering) collapses to one event; a synthetic sequence with
   intermittent low-confidence noise mixed into mostly-blank windows does
-  not falsely trigger.
+  not falsely trigger. (Met: the two `test_backlog_ac*` tests named in
+  "Shipped".)
 
-### Blocked by
+### Blocked by (resolved)
 
-The wake-word/gate component does not exist yet. This cannot start
-until that component defines what "the listening period" actually is —
-building a mode-smoothing policy against an arbitrary/unbounded window
-would be speculative in exactly the way the rest of this feature
-deliberately avoided.
+The wake-word/gate component did not exist yet when this was deferred.
+It now exists as the abstract `ListeningGate` seam plus the
+`SpacebarGate` stand-in (shipped 2026-09-21;
+`docs/STREAMING-CONTRACT.md` section 6) — blocker resolved. A real wake-word
+detector is now a future *gate implementation*, not a prerequisite for
+this policy.
