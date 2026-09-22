@@ -6,6 +6,7 @@ Trains `MatchboxNetCTC` against `out/conversions/v2/test_set/manifest.csv`'s
 `--preset` selects the model capacity: `default` (~254k params) is the
 usual choice; `optionc` (~754k params) is a mid-scale config for testing
 whether more parameters improve decode accuracy on the same manifest;
+`optiond` (~1.01M params) is the normal-scale config;
 `spec-scale` (~2.14M params) exists only for size-budget reporting, per
 ticket 04's Non-Goals, and is not expected to be trained here.
 
@@ -160,7 +161,11 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--manifest", type=Path, default=DEFAULT_MANIFEST)
     parser.add_argument("--out-dir", type=Path, default=Path("out/vcm"))
-    parser.add_argument("--preset", default="default", choices=["default", "spec-scale", "optionc"])
+    parser.add_argument(
+        "--preset",
+        default="default",
+        choices=["default", "spec-scale", "optionc", "optiond"],
+    )
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--max-minutes", type=float, default=30.0)
     parser.add_argument("--max-epochs", type=int, default=150)

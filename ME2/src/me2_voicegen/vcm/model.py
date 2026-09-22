@@ -18,7 +18,7 @@ This model never changes the time dimension: every conv here uses
 computed pre-model (from `vcm.dataset.collate_fn`) remain valid
 post-model with no separate output-length bookkeeping.
 
-Three presets:
+Four presets:
     - default: sized for this toy's ~32 minutes of training audio,
       roughly 250k-400k params (this task's own engineering call, not
       dictated by the original spec).
@@ -31,6 +31,10 @@ Three presets:
       wider (112 channels vs 72) than `default`, but well short of
       `spec-scale`'s width. Trained the same way as `default`
       (`--preset optionc`); not part of the original spec.
+    - "optiond": the normal-scale config (~1.01M params), with 5 TCS
+      blocks, 128 channels, a 64-channel prologue, and a 224-channel
+      epilogue. It is trained through the same CLI and Make target as the
+      other presets (`--preset optiond`).
 """
 
 from __future__ import annotations
@@ -101,10 +105,21 @@ config for comparing decode accuracy against `default` on the same
 manifest, to test whether more parameters actually help. Trained the same
 way as `default` (`--preset optionc`)."""
 
+OPTIOND_CONFIG = MatchboxNetConfig(
+    n_mels=40,
+    n_blocks=5,
+    channels=128,
+    kernel_sizes=[11, 13, 15, 17, 19],
+    prologue_channels=64,
+    epilogue_channels=224,
+)
+"""~1.01M params -- the normal-scale MatchboxNetCTC config."""
+
 PRESETS: dict[str, MatchboxNetConfig] = {
     "default": DEFAULT_CONFIG,
     "spec-scale": SPEC_SCALE_CONFIG,
     "optionc": OPTIONC_CONFIG,
+    "optiond": OPTIOND_CONFIG,
 }
 
 

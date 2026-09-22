@@ -204,6 +204,11 @@ def test_onecycle_epochs_defaults_to_max_epochs_not_a_fixed_horizon():
     assert args_explicit.onecycle_epochs == 20  # explicit override still respected
 
 
+def test_training_parser_accepts_optiond_preset():
+    args = build_arg_parser().parse_args(["--preset", "optiond"])
+    assert args.preset == "optiond"
+
+
 def test_onecycle_schedule_tracking_max_epochs_does_not_freeze_near_zero():
     """Directly demonstrates the bug class: with the OLD fixed 20-epoch
     OneCycleLR sizing, the LR at the same step count a longer run would

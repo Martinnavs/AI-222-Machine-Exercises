@@ -36,6 +36,15 @@ def test_optionc_preset_instantiates_under_1m_and_bigger_than_default():
     assert n_bytes > n_params
 
 
+def test_optiond_preset_instantiates_at_normal_scale_and_bigger_than_optionc():
+    model = build_model("optiond")
+    n_params = param_count(model)
+    assert 950_000 <= n_params <= 1_050_000, n_params
+    assert n_params > param_count(build_model("optionc"))
+    n_bytes = estimated_int8_bytes(model)
+    assert n_bytes > n_params
+
+
 def test_unknown_preset_raises():
     import pytest
 
@@ -53,6 +62,13 @@ def test_forward_shape_matches_alphabet_and_preserves_time():
 
 def test_forward_shape_spec_scale():
     model = MatchboxNetCTC(SPEC_SCALE_CONFIG)
+    features = torch.randn(1, 40, 21)
+    logits = model(features)
+    assert logits.shape == (1, 21, ALPHABET_SIZE)
+
+
+def test_forward_shape_optiond():
+    model = build_model("optiond")
     features = torch.randn(1, 40, 21)
     logits = model(features)
     assert logits.shape == (1, 21, ALPHABET_SIZE)
