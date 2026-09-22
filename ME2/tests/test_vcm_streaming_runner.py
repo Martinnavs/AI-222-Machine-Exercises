@@ -689,6 +689,12 @@ def test_streaming_runner_init_signature_unchanged_by_mode_period_wiring():
     # Approved deviation 1 confines the runner change to `_evaluate_window`:
     # a gate-aware policy goes in through the existing `policy` parameter,
     # so this signature stays exactly as it was.
+    #
+    # Intentional contract update (ticket 03 of
+    # .scratch/incomplete-grammar-rejection/tickets): `required_command_margin`
+    # was appended after `log_all_windows` (before `out`) for the
+    # incomplete-prefix rejection gate; it defaults to None (gate disabled)
+    # so every existing caller is unchanged.
     params = list(inspect.signature(StreamingRunner.__init__).parameters)
     assert params == [
         "self",
@@ -702,6 +708,7 @@ def test_streaming_runner_init_signature_unchanged_by_mode_period_wiring():
         "beam_width",
         "listen_for_s",
         "log_all_windows",
+        "required_command_margin",
         "out",
         "summary_out",
         "poll_interval_s",
@@ -868,6 +875,81 @@ def test_jsonl_payload_key_set_unchanged():
     ]
     for line in lines:
         assert set(json.loads(line)) == expected_keys
+
+
+def _broken_color_logp(total_frames: int = 200) -> np.ndarray:
+    """Broken-`color` evidence: greedy text `color`, weak `time` terminal,
+    high-confidence trailing blanks (duplicate of the fixture in
+    tests/test_vcm_decoder_incomplete_prefix.py -- tests/ is not a package,
+    so duplication is the repo idiom for test helpers). With the
+    incomplete-prefix margin enabled, this decodes as a gate rejection."""
+    neq = float("-inf")
+    q_color, q_blank = 0.56, 0.44
+    q_time = math.exp((-6.98 - 5.0 * math.log(q_blank)) / 4.0)
+    logp = np.full((total_frames, 29), neq, dtype=np.float64)
+    for t, ch in enumerate("color"):
+        logp[t, alphabet.CHAR_TO_ID[ch]] = math.log(q_color)
+        logp[t, alphabet.BLANK_ID] = math.log(q_blank)
+    for i, ch in enumerate("time"):
+        logp[5 + i, alphabet.CHAR_TO_ID[ch]] = math.log(q_time)
+        logp[5 + i, alphabet.BLANK_ID] = math.log(1.0 - q_time)
+    logp[9:, alphabet.BLANK_ID] = 0.0
+    return logp
+
+
+def test_jsonl_keeps_key_set_and_surfaces_gate_rejection_via_existing_fields_only():
+    """Ticket 03 E8 / audit E4: with the margin enabled the JSONL payload
+    keeps exactly its documented key set (the new DecodeResult fields do
+    not leak), and a gate rejection surfaces only as `intent: null` /
+    `confidence: null`; with the margin off the same run is the documented
+    false accept, same key set."""
+    expected_keys = frozenset(
+        (
+            "event",
+            "t_seconds",
+            "window_index",
+            "intent",
+            "slots",
+            "text",
+            "confidence",
+            "policy_reason",
+        )
+    )
+
+    def run_lockstep(margin) -> list[dict]:
+        out = io.StringIO()
+        StreamingRunner(
+            source=_ArrayAudioSource(np.zeros(24000, dtype=np.float32), block_samples=4000),
+            backend=_FixedLogpBackend(_broken_color_logp()),
+            grammar=OPTIONB_GRAMMAR,
+            policy=ThresholdPolicy(threshold=-1e6),
+            window_s=1.0,
+            stride_s=0.25,
+            refractory_s=1.5,
+            beam_width=25,
+            log_all_windows=True,
+            required_command_margin=margin,
+            out=out,
+        ).run()
+        return [json.loads(line) for line in out.getvalue().strip().splitlines()]
+
+    # Gate enabled: every window is rejected by the margin gate; the
+    # rejection is observable only through the existing fields.
+    gated = run_lockstep(0.0)
+    assert gated
+    assert all(set(record) == expected_keys for record in gated)
+    assert all(record["event"] == "window" for record in gated)
+    assert all(record["intent"] is None for record in gated)
+    assert all(record["confidence"] is None for record in gated)
+
+    # Gate disabled: the documented false accept, identical key set.
+    baseline = run_lockstep(None)
+    assert baseline
+    assert all(set(record) == expected_keys for record in baseline)
+    assert any(
+        record["intent"] == "TIME" and record["confidence"] is not None
+        for record in baseline
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -1460,3 +1542,55 @@ def test_cli_banner_reports_log_periods_when_enabled():
         "logging: per-period digest on stderr (--log-periods)"
         in banner_for(StreamingConfig(log_periods=True))
     )
+
+
+# ---------------------------------------------------------------------------
+# required_command_margin threading (ticket 03 of
+# .scratch/incomplete-grammar-rejection/tickets, docs/
+# INCOMPLETE-GRAMMAR-REJECTION.md Step 3).
+# ---------------------------------------------------------------------------
+
+
+def test_runner_passes_required_command_margin_to_decode(monkeypatch):
+    """The runner must hand its `required_command_margin` (default `None`)
+    to `decode` on every window evaluation."""
+    import me2_voicegen.vcm.streaming.runner as runner_mod
+
+    from me2_voicegen.vcm.decoder import DecodeResult
+
+    calls: list = []
+
+    def _recording_decode(
+        logp, grammar, threshold, beam_width, required_command_margin=None
+    ):
+        calls.append(required_command_margin)
+        return DecodeResult(
+            intent=None,
+            slots={},
+            text="",
+            confidence=float("-inf"),
+            no_match=True,
+            out_of_grammar_gap=float("inf"),
+        )
+
+    monkeypatch.setattr(runner_mod, "decode", _recording_decode)
+
+    for margin in (None, 0.0):
+        calls.clear()
+        source = _ArrayAudioSource(np.zeros(24000, dtype=np.float32), block_samples=4000)
+        backend = _FixedLogpBackend(_one_hot_logp([alphabet.BLANK_ID] * 5))
+        runner = StreamingRunner(
+            source=source,
+            backend=backend,
+            grammar=OPTIONB_GRAMMAR,
+            policy=ThresholdPolicy(threshold=-1e6),
+            window_s=1.0,
+            stride_s=0.25,
+            refractory_s=1.5,
+            beam_width=25,
+            required_command_margin=margin,
+            out=io.StringIO(),
+        )
+        runner.run()
+        assert len(calls) > 0
+        assert all(m == margin for m in calls)

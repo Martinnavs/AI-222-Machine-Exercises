@@ -28,6 +28,7 @@ VCM_BENCH_N_ITERS ?= 100
 VCM_EVAL_BEAM_WIDTH ?= 50
 VCM_SLOT_EVAL_MANIFEST ?= $(VCM_OUT_DIR)/metadata/slot_eval/manifest.csv
 VCM_GRAMMAR ?= spec,toy
+VCM_EVAL_REQUIRED_COMMAND_MARGIN ?=
 
 OPTIONB_MANIFEST ?= out/conversions/v2/optionb/manifest.csv
 OPTIONB_OUT_DIR ?= out/vcm/optionb
@@ -71,7 +72,7 @@ vcm-bench:
 	$(UV) run python -m me2_voicegen.vcm.benchmark --checkpoint "$(VCM_CHECKPOINT)" --out-dir "$(VCM_OUT_DIR)" --manifest "$(VCM_MANIFEST)" --calibration-samples $(VCM_BENCH_CALIBRATION_SAMPLES) --n-iters $(VCM_BENCH_N_ITERS)
 
 vcm-eval:
-	$(UV) run python -m me2_voicegen.vcm.evaluate --manifest "$(VCM_MANIFEST)" --checkpoint "$(VCM_CHECKPOINT)" --out-dir "$(VCM_OUT_DIR)" --device $(VCM_DEVICE) --beam-width $(VCM_EVAL_BEAM_WIDTH) --slot-eval-manifest "$(VCM_SLOT_EVAL_MANIFEST)" --grammar $(VCM_GRAMMAR)
+	$(UV) run python -m me2_voicegen.vcm.evaluate --manifest "$(VCM_MANIFEST)" --checkpoint "$(VCM_CHECKPOINT)" --out-dir "$(VCM_OUT_DIR)" --device $(VCM_DEVICE) --beam-width $(VCM_EVAL_BEAM_WIDTH) --slot-eval-manifest "$(VCM_SLOT_EVAL_MANIFEST)" --grammar $(VCM_GRAMMAR) $(if $(VCM_EVAL_REQUIRED_COMMAND_MARGIN),--required-command-margin $(VCM_EVAL_REQUIRED_COMMAND_MARGIN),)
 
 # Option B convenience targets: same vcm-train/vcm-eval machinery, pointed
 # at out/conversions/v2/optionb/manifest.csv (D6c) and OPTIONB_GRAMMAR
@@ -84,7 +85,7 @@ optionb-train:
 	$(UV) run python -m me2_voicegen.vcm.train --manifest "$(OPTIONB_MANIFEST)" --out-dir "$(OPTIONB_OUT_DIR)" --preset $(VCM_PRESET) --device $(VCM_DEVICE) --max-minutes $(VCM_MAX_MINUTES) --seed $(VCM_SEED)
 
 optionb-eval:
-	$(UV) run python -m me2_voicegen.vcm.evaluate --manifest "$(OPTIONB_MANIFEST)" --checkpoint "$(OPTIONB_OUT_DIR)/checkpoints/checkpoint.pt" --out-dir "$(OPTIONB_OUT_DIR)" --device $(VCM_DEVICE) --beam-width $(VCM_EVAL_BEAM_WIDTH) --slot-eval-manifest "$(OPTIONB_OUT_DIR)/metadata/slot_eval/manifest.csv" --grammar optionb
+	$(UV) run python -m me2_voicegen.vcm.evaluate --manifest "$(OPTIONB_MANIFEST)" --checkpoint "$(OPTIONB_OUT_DIR)/checkpoints/checkpoint.pt" --out-dir "$(OPTIONB_OUT_DIR)" --device $(VCM_DEVICE) --beam-width $(VCM_EVAL_BEAM_WIDTH) --slot-eval-manifest "$(OPTIONB_OUT_DIR)/metadata/slot_eval/manifest.csv" --grammar optionb $(if $(VCM_EVAL_REQUIRED_COMMAND_MARGIN),--required-command-margin $(VCM_EVAL_REQUIRED_COMMAND_MARGIN),)
 
 # Streaming spoken-command runner (ticket 04 of feature optionb-streaming).
 # STREAM_SOURCE defaults to the live microphone; override with a wav path

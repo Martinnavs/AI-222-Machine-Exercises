@@ -145,16 +145,42 @@ or padded `vcm.alphabet.encode` output per example) + `target_len`
 shape (`nn.CTCLoss` expects exactly this: padded input + input_lengths +
 target + target_lengths).
 
-## 7. Decoder input/output contract (Task 03 implements this; not yet built)
+## 7. Decoder input/output contract (source of truth: `vcm/decoder.py`)
 
 - **Input:** a CTC posterior/log-prob array over the 29-token alphabet
   (§1), shape `(T, 29)` for a single utterance or `(B, T, 29)` for a batch.
-- **Output:** `{intent, slots: dict, text, confidence, no_match: bool}` —
-  `intent` is one of the 20 `INTENT_PHRASES` keys or `None`, `slots` is
+- **Output:** a `DecodeResult` — `{intent, slots: dict, text, confidence,
+  no_match: bool, out_of_grammar_gap: float}` plus these defaulted
+  diagnostics/gate-metadata fields (docs/INCOMPLETE-GRAMMAR-REJECTION.md,
+  Step 2/3): `grammar_text` (the selected accepted terminal phrase; may
+  differ from the unconstrained greedy `text`; `""` when no terminal),
+  `rejection_reason` (`"incomplete_prefix"`, and only when the margin gate
+  below is enabled and rejected; otherwise `None`), `incomplete_prefix`
+  (the winning designated incomplete prefix, or `None`), `incomplete_gap`
+  (`command_raw_score - incomplete_raw_score`, or `None`), and
+  `command_raw_score` / `incomplete_raw_score` — raw UNNORMALIZED beam log
+  masses (not /T), hence invariant to trailing blank padding. `intent` is
+  one of the 20 `INTENT_PHRASES` keys or `None`, `slots` is
   whatever the grammar for that intent extracted (empty dict if none),
   `text` is the raw decoded/collapsed transcript, `confidence` is the
   decoder's own score, `no_match` is `True` when nothing in the grammar
   accepted the decode (`intent` is then `None`).
+- **Margin gate (`required_command_margin`, docs/INCOMPLETE-GRAMMAR-
+  REJECTION.md Step 3):** `decode`/`decode_utterance` take
+  `required_command_margin: float | None = None`, threaded through this
+  contract's caller chain (`pipeline.infer_waveform`,
+  `SlidingWindowPipeline`, `StreamingRunner`, `vcm.evaluate`'s
+  `--required-command-margin` / `decode_split`, and the Makefile variable
+  `VCM_EVAL_REQUIRED_COMMAND_MARGIN`). `None` — the default at every
+  surface — disables the gate and acceptance is exactly the baseline.
+  When set, the strongest designated incomplete-prefix beam (a beam whose
+  exact prefix is in `grammar.incomplete_prefixes`) is compared against
+  the best completed terminal on raw unnormalized beam log mass: if
+  `incomplete_gap < required_command_margin` (strict `<` — a tie passes)
+  the result is `no_match` with `rejection_reason = "incomplete_prefix"`.
+  The existing confidence threshold stays an independent second gate.
+  Grammars with an empty `incomplete_prefixes` (e.g. `SPEC_GRAMMAR`,
+  `TOY_GRAMMAR`) are unaffected by the gate.
 
 ## 8. Grammar selection in `vcm.evaluate` (source of truth: `vcm/evaluate.py`'s `GRAMMAR_REGISTRY`/`--grammar`)
 

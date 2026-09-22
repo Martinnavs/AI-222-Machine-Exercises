@@ -15,7 +15,19 @@ phrases the dataset was never recorded with.
 
 from __future__ import annotations
 
-from me2_voicegen.common.grammar_core import Grammar, alt, compile_grammar, literal, seq, slot, with_intent, _vocab
+import dataclasses
+
+from me2_voicegen.common.grammar_core import (
+    Grammar,
+    alt,
+    compile_grammar,
+    derive_incomplete_prefixes,
+    literal,
+    seq,
+    slot,
+    with_intent,
+    _vocab,
+)
 from .numbers import spell_integer
 
 
@@ -234,4 +246,14 @@ OPTIONB_RULES: dict[str, list[tuple[tuple[str, ...], dict, str]]] = {
     "$CMD_LIST_REMINDERS": CMD_LIST_REMINDERS,
 }
 
-OPTIONB_GRAMMAR: Grammar = compile_grammar("OPTIONB_GRAMMAR", OPTIONB_RULES)
+# Inference-only rejection metadata (docs/INCOMPLETE-GRAMMAR-REJECTION.md):
+# the designated whole-word prefixes ("color", "set the lights to", ...)
+# attached to the grammar as immutable metadata. The accepted phrase surface
+# is exactly the freshly compiled one -- the `dataclasses.replace` changes
+# nothing but the new defaulted field, so `accepts`/`all_phrases` semantics
+# are unchanged and "color" stays absent from the accepted grammar.
+_OPTIONB_BASE: Grammar = compile_grammar("OPTIONB_GRAMMAR", OPTIONB_RULES)
+OPTIONB_GRAMMAR: Grammar = dataclasses.replace(
+    _OPTIONB_BASE,
+    incomplete_prefixes=derive_incomplete_prefixes(_OPTIONB_BASE),
+)

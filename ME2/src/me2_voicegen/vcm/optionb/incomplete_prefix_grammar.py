@@ -14,30 +14,12 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from me2_voicegen.common.grammar_core import Grammar
+# `derive_incomplete_prefixes` moved to `common.grammar_core` (it is
+# grammar-generic, per the spec's "preferred merge"); re-exported here so the
+# module's public API -- and every existing import of it -- is unchanged.
+from me2_voicegen.common.grammar_core import Grammar, derive_incomplete_prefixes
 
 from .grammar import OPTIONB_GRAMMAR
-
-
-def derive_incomplete_prefixes(grammar: Grammar) -> frozenset[str]:
-    """Return non-command, proper whole-word prefixes of accepted phrases.
-
-    An accepted command is never returned, even when it is a strict prefix of
-    another command.  This preserves commands such as ``"pause"`` and
-    ``"time"`` while identifying incomplete slot-bearing phrases such as
-    ``"color"``.
-    """
-    accepted = {text for text, _, _ in grammar.all_phrases()}
-    prefixes: set[str] = set()
-
-    for phrase in accepted:
-        words = phrase.split()
-        for word_count in range(1, len(words)):
-            prefix = " ".join(words[:word_count])
-            if prefix not in accepted:
-                prefixes.add(prefix)
-
-    return frozenset(prefixes)
 
 
 @dataclass(frozen=True)

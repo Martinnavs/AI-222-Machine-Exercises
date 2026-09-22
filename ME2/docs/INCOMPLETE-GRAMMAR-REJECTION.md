@@ -1,7 +1,11 @@
 # Incomplete Grammar Rejection: Design and Agent Handoff
 
-Status: experimental rejection grammar implemented; decoder gate and cluster
-validation are not yet implemented.
+Status: Steps 1–4 implemented locally — grammar metadata merged into the
+production `Grammar`, decoder diagnostics plus the parameterized
+`required_command_margin` gate (disabled by default; `None` = baseline),
+and evaluate/streaming/Makefile plumbing, all behind a deterministic no-WAV
+regression suite. Step 5 (cluster margin calibration + held-out reporting)
+remains, on the cluster.
 
 This document explains the observed false acceptance of incomplete Option B
 commands, records a deterministic reproduction, and gives the next agent an
@@ -16,10 +20,13 @@ evaluation/calibration set on the cluster.
 
 ## Next agent: start here
 
-The experimental grammar and its invariant tests are complete. The production
-decoder does not consume that grammar yet, so current runtime behavior is
-unchanged. Continue at **Step 2** under Implementation plan; do not rebuild
-Step 1.
+Steps 1–4 are implemented (ticket logs: `.scratch/
+incomplete-grammar-rejection/tickets/`): the production `Grammar` carries
+`incomplete_prefixes`, and `decode`/`decode_utterance` (plus every caller
+in VCM-CONTRACT.md section 7's chain) take `required_command_margin`,
+default `None` = gate disabled = baseline acceptance unchanged. Continue at
+**Step 5** (cluster margin calibration + held-out reporting); do not rebuild
+Steps 1–4.
 
 1. Read `incomplete_prefix_grammar.py`, `decoder.py`, and the Candidate
    comparison section below.
@@ -29,14 +36,11 @@ Step 1.
    .venv/bin/pytest tests/test_optionb_incomplete_prefix_grammar.py tests/test_optionb_grammar.py
    ```
 
-3. Add decoder diagnostics with the rejection gate disabled and verify that
-   existing decoder behavior is unchanged.
-4. Implement the parameterized gate and deterministic no-WAV posterior test.
-5. Move evaluation to the cluster only after local unit tests pass; discover
-   the real dataset through `out/` and the resolved `optionb-train` command as
-   described in Step 5.
+3. Continue at **Step 5**: move evaluation to the cluster only after local
+   unit tests pass; discover the real dataset through `out/` and the
+   resolved `optionb-train` command as described in Step 5.
 
-The handoff is successful when a fresh agent can identify Step 2 as the first
+The handoff is successful when a fresh agent can identify Step 5 as the first
 unfinished action, preserve the accepted grammar unchanged, and avoid assuming
 that local audio files exist.
 

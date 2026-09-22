@@ -86,6 +86,7 @@ class StreamingRunner:
         beam_width: int,
         listen_for_s: Optional[float] = None,
         log_all_windows: bool = False,
+        required_command_margin: Optional[float] = None,
         out: TextIO = sys.stdout,
         summary_out: TextIO = sys.stderr,
         poll_interval_s: float = 0.005,
@@ -105,6 +106,9 @@ class StreamingRunner:
             int(round(listen_for_s * SAMPLE_RATE)) if listen_for_s is not None else None
         )
         self.log_all_windows = log_all_windows
+        # Incomplete-prefix rejection gate margin (docs/
+        # INCOMPLETE-GRAMMAR-REJECTION.md, Step 3); None = gate disabled.
+        self.required_command_margin = required_command_margin
         self.poll_interval_s = poll_interval_s
 
         self._out = out
@@ -237,7 +241,13 @@ class StreamingRunner:
                 return
             waveform = self._buffer.snapshot_range(request.start_samples, request.end_samples)
         logp = np.asarray(self.backend.logp_for_waveform(waveform))
-        result = decode(logp, self.grammar, threshold=NEG_INF, beam_width=self.beam_width)
+        result = decode(
+            logp,
+            self.grammar,
+            threshold=NEG_INF,
+            beam_width=self.beam_width,
+            required_command_margin=self.required_command_margin,
+        )
 
         obs = WindowObservation(
             window_index=self._window_index, samples_seen=samples_seen, result=result,

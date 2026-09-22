@@ -57,6 +57,19 @@ class DecodeResult:
     confidence: float
     no_match: bool
     out_of_grammar_gap: float
+    # Diagnostics + rejection metadata (docs/INCOMPLETE-GRAMMAR-REJECTION.md,
+    # Step 2): all defaulted so existing construction/read sites stay valid.
+    # `grammar_text` is the selected terminal phrase, which may differ from
+    # the unconstrained greedy `text`. The raw scores are UNNORMALIZED beam
+    # log masses (not /T), so `incomplete_gap` is invariant to trailing
+    # blank padding. `rejection_reason` is only ever set when the gate is
+    # enabled (`required_command_margin` is not None).
+    grammar_text: str = ""
+    rejection_reason: str | None = None
+    incomplete_prefix: str | None = None
+    incomplete_gap: float | None = None
+    command_raw_score: float | None = None
+    incomplete_raw_score: float | None = None
 
 
 def _greedy_unconstrained(logp: np.ndarray) -> tuple[str, float]:
@@ -135,11 +148,25 @@ def decode_utterance(
     grammar: Grammar,
     threshold: float,
     beam_width: int = 50,
+    required_command_margin: float | None = None,
 ) -> DecodeResult:
     """logp: (T, 29) log-probabilities/log-posteriors over the 29-token
     alphabet (docs/VCM-CONTRACT.md section 7). `threshold` is a mean
     per-frame log-probability cutoff the caller must supply -- never
-    hardcoded here (Task 05 sweeps it)."""
+    hardcoded here (Task 05 sweeps it).
+
+    `required_command_margin` (docs/INCOMPLETE-GRAMMAR-REJECTION.md, Step 3):
+    when None (default) the gate is disabled and acceptance is exactly the
+    baseline. When set, the strongest designated incomplete-prefix beam
+    (a beam whose exact prefix is in `grammar.incomplete_prefixes`) is
+    compared against the best completed terminal on RAW unnormalized beam log
+    mass -- not /T, which rewards unrelated trailing blank frames. If
+    `incomplete_gap = best_command_raw - best_incomplete_raw` falls below the
+    margin, the result is `no_match` with `rejection_reason =
+    "incomplete_prefix"`. The existing confidence threshold stays an
+    independent second gate. Decision order: (1) no completed terminal ->
+    `no_match`, incomplete-prefix reason when applicable; (2) margin gate;
+    (3) confidence threshold; (4) accept."""
     T = logp.shape[0]
     greedy_text, greedy_score = _greedy_unconstrained(logp)
 
@@ -148,6 +175,8 @@ def decode_utterance(
     best_intent: str | None = None
     best_slots: dict = {}
     best_score = NEG_INF
+    best_command_prefix: str | None = None
+    best_command_raw: float | None = None
     for prefix, entry in beams.items():
         if entry.node.terminal is None:
             continue
@@ -155,8 +184,41 @@ def decode_utterance(
         if score > best_score:
             intent, slots_ = entry.node.terminal[0]
             best_intent, best_slots, best_score = intent, slots_, score
+            best_command_prefix, best_command_raw = prefix, entry.total()
 
-    no_match = best_intent is None or best_score < threshold
+    # Strongest designated incomplete-prefix competitor in the final beam, on
+    # raw (unnormalized, duration-invariant) beam log mass. Grammars that did
+    # not opt in carry the empty set -> no competitor -> gate is a no-op.
+    best_incomplete_prefix: str | None = None
+    best_incomplete_raw: float | None = None
+    for prefix in grammar.incomplete_prefixes:
+        entry = beams.get(prefix)
+        if entry is None:
+            continue
+        raw = entry.total()
+        if best_incomplete_raw is None or raw > best_incomplete_raw:
+            best_incomplete_prefix, best_incomplete_raw = prefix, raw
+
+    incomplete_gap: float | None = None
+    if best_command_raw is not None and best_incomplete_raw is not None:
+        incomplete_gap = best_command_raw - best_incomplete_raw
+
+    if required_command_margin is None:
+        # Baseline: unchanged acceptance rule, no rejection reason.
+        no_match = best_intent is None or best_score < threshold
+        rejection_reason: str | None = None
+    elif best_intent is None:
+        no_match = True
+        rejection_reason = (
+            "incomplete_prefix" if best_incomplete_prefix is not None else None
+        )
+    elif incomplete_gap is not None and incomplete_gap < required_command_margin:
+        no_match = True
+        rejection_reason = "incomplete_prefix"
+    else:
+        no_match = best_score < threshold
+        rejection_reason = None
+
     gap = greedy_score - best_score if best_intent is not None else float("inf")
 
     return DecodeResult(
@@ -166,6 +228,12 @@ def decode_utterance(
         confidence=best_score,
         no_match=no_match,
         out_of_grammar_gap=gap,
+        grammar_text=best_command_prefix if best_command_prefix is not None else "",
+        rejection_reason=rejection_reason,
+        incomplete_prefix=best_incomplete_prefix,
+        incomplete_gap=incomplete_gap,
+        command_raw_score=best_command_raw,
+        incomplete_raw_score=best_incomplete_raw,
     )
 
 
@@ -174,16 +242,30 @@ def decode(
     grammar: Grammar,
     threshold: float,
     beam_width: int = 50,
+    required_command_margin: float | None = None,
 ) -> DecodeResult | list[DecodeResult]:
     """Accepts (T, 29) for a single utterance (-> one DecodeResult) or
     (B, T, 29) for a batch (-> list[DecodeResult]), per
-    docs/VCM-CONTRACT.md section 7."""
+    docs/VCM-CONTRACT.md section 7. `required_command_margin` (see
+    `decode_utterance`) applies to every row of a batch."""
     logp = np.asarray(logp)
     if logp.ndim == 2:
-        return decode_utterance(logp, grammar, threshold, beam_width=beam_width)
+        return decode_utterance(
+            logp,
+            grammar,
+            threshold,
+            beam_width=beam_width,
+            required_command_margin=required_command_margin,
+        )
     if logp.ndim == 3:
         return [
-            decode_utterance(logp[b], grammar, threshold, beam_width=beam_width)
+            decode_utterance(
+                logp[b],
+                grammar,
+                threshold,
+                beam_width=beam_width,
+                required_command_margin=required_command_margin,
+            )
             for b in range(logp.shape[0])
         ]
     raise ValueError(f"expected logp of shape (T, 29) or (B, T, 29), got {logp.shape}")
