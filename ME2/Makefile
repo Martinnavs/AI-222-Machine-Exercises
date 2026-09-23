@@ -37,7 +37,7 @@ STREAM_BACKEND ?= onnx
 STREAM_SOURCE ?= mic
 STREAM_ARGS ?=
 
-.PHONY: sync vendor download-model generate generate-personas generate-conversions test clean vcm-train vcm-bench vcm-eval optionb-train optionb-eval stream wakeword-fetch-positives wakeword-fetch-positives-dry-run wakeword-convert-positives wakeword-convert-positives-dry-run wakeword-generate-silence wakeword-generate-silence-dry-run
+.PHONY: sync vendor download-model generate generate-personas generate-conversions test clean vcm-train vcm-bench vcm-eval optionb-train optionb-eval stream wakeword-fetch-positives wakeword-fetch-positives-dry-run wakeword-convert-positives wakeword-convert-positives-dry-run wakeword-generate-silence wakeword-generate-silence-dry-run wakeword-generate-adversaries wakeword-generate-adversaries-dry-run
 
 WAKEWORD_CLONE_DIR ?= $(if $(TMPDIR),$(TMPDIR),/tmp)/me2_wakeword_clone
 WAKEWORD_POSITIVES_OUT_DIR ?= out/conversions/v2/wakeword/positives_real
@@ -49,6 +49,8 @@ WAKEWORD_MAX_CONVERSIONS ?=
 WAKEWORD_SILENCE_OUT_DIR ?= out/conversions/v2/wakeword/silence_synthetic
 WAKEWORD_SILENCE_SEED ?= 0
 WAKEWORD_SILENCE_TOTAL_COUNT ?= 1806
+WAKEWORD_ADVERSARIES_REFS_DIR ?= $(REFS_DIR)
+WAKEWORD_ADVERSARIES_OUT_DIR ?= out/conversions/v2/wakeword/adversaries
 
 sync:
 	$(UV) sync
@@ -153,6 +155,17 @@ wakeword-generate-silence:
 
 wakeword-generate-silence-dry-run:
 	$(UV) run python -m me2_voicegen.wakeword.generate_silence --out-root "$(WAKEWORD_SILENCE_OUT_DIR)" --seed $(WAKEWORD_SILENCE_SEED) --total-count $(WAKEWORD_SILENCE_TOTAL_COUNT) --dry-run
+
+# `generate_adversaries.py` (ticket 02) -- phonetic near-miss TTS renders of
+# "computer" for the `_unknown_` class, across WAKEWORD_ADVERSARIES_REFS_DIR
+# (defaults to the same reference-voice pool generate-conversions already
+# uses, REFS_DIR). Independent of the fetch-positives/generate-silence
+# targets above (no shared clone dir, no network -- local TTS only).
+wakeword-generate-adversaries:
+	$(UV) run python -m me2_voicegen.wakeword.generate_adversaries --refs-dir "$(WAKEWORD_ADVERSARIES_REFS_DIR)" --out-root "$(WAKEWORD_ADVERSARIES_OUT_DIR)" --backend $(BACKEND)
+
+wakeword-generate-adversaries-dry-run:
+	$(UV) run python -m me2_voicegen.wakeword.generate_adversaries --refs-dir "$(WAKEWORD_ADVERSARIES_REFS_DIR)" --out-root "$(WAKEWORD_ADVERSARIES_OUT_DIR)" --backend $(BACKEND) --dry-run
 
 test:
 	$(UV) run pytest
