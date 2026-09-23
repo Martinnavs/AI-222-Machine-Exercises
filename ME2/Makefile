@@ -37,7 +37,7 @@ STREAM_BACKEND ?= onnx
 STREAM_SOURCE ?= mic
 STREAM_ARGS ?=
 
-.PHONY: sync vendor download-model generate generate-personas generate-conversions test clean vcm-train vcm-bench vcm-eval optionb-train optionb-eval stream wakeword-fetch-positives wakeword-fetch-positives-dry-run wakeword-convert-positives wakeword-convert-positives-dry-run
+.PHONY: sync vendor download-model generate generate-personas generate-conversions test clean vcm-train vcm-bench vcm-eval optionb-train optionb-eval stream wakeword-fetch-positives wakeword-fetch-positives-dry-run wakeword-convert-positives wakeword-convert-positives-dry-run wakeword-generate-silence wakeword-generate-silence-dry-run
 
 WAKEWORD_CLONE_DIR ?= $(if $(TMPDIR),$(TMPDIR),/tmp)/me2_wakeword_clone
 WAKEWORD_POSITIVES_OUT_DIR ?= out/conversions/v2/wakeword/positives_real
@@ -46,6 +46,9 @@ WAKEWORD_REFS_DIR ?= $(REFS_DIR)
 WAKEWORD_K ?= 8
 WAKEWORD_SEED ?= 0
 WAKEWORD_MAX_CONVERSIONS ?=
+WAKEWORD_SILENCE_OUT_DIR ?= out/conversions/v2/wakeword/silence_synthetic
+WAKEWORD_SILENCE_SEED ?= 0
+WAKEWORD_SILENCE_TOTAL_COUNT ?= 1806
 
 sync:
 	$(UV) sync
@@ -141,6 +144,15 @@ wakeword-convert-positives:
 wakeword-convert-positives-dry-run:
 	@test -n "$(strip $(WAKEWORD_CONVERTED_OUT_DIR))" || { echo "WAKEWORD_CONVERTED_OUT_DIR must not be empty" >&2; exit 1; }
 	$(UV) run python -m me2_voicegen.wakeword.convert_positives --positives-manifest "$(WAKEWORD_POSITIVES_OUT_DIR)/manifest.csv" --refs-dir "$(WAKEWORD_REFS_DIR)" --out-root "$(WAKEWORD_CONVERTED_OUT_DIR)" --k $(WAKEWORD_K) --seed $(WAKEWORD_SEED) --dry-run
+
+# `generate_silence.py` (ticket 05) -- synthetic Gaussian/pink/brown
+# colored-noise `_silence_` chunks. Fully independent of the
+# wakeword-fetch-positives targets above (no shared clone dir, no network).
+wakeword-generate-silence:
+	$(UV) run python -m me2_voicegen.wakeword.generate_silence --out-root "$(WAKEWORD_SILENCE_OUT_DIR)" --seed $(WAKEWORD_SILENCE_SEED) --total-count $(WAKEWORD_SILENCE_TOTAL_COUNT)
+
+wakeword-generate-silence-dry-run:
+	$(UV) run python -m me2_voicegen.wakeword.generate_silence --out-root "$(WAKEWORD_SILENCE_OUT_DIR)" --seed $(WAKEWORD_SILENCE_SEED) --total-count $(WAKEWORD_SILENCE_TOTAL_COUNT) --dry-run
 
 test:
 	$(UV) run pytest
