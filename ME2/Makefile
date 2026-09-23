@@ -37,7 +37,7 @@ STREAM_BACKEND ?= onnx
 STREAM_SOURCE ?= mic
 STREAM_ARGS ?=
 
-.PHONY: sync vendor download-model generate generate-personas generate-conversions test clean vcm-train vcm-bench vcm-eval optionb-train optionb-eval stream wakeword-fetch-positives wakeword-fetch-positives-dry-run wakeword-convert-positives wakeword-convert-positives-dry-run wakeword-generate-silence wakeword-generate-silence-dry-run wakeword-generate-adversaries wakeword-generate-adversaries-dry-run wakeword-mix-noise wakeword-mix-noise-dry-run
+.PHONY: sync vendor download-model generate generate-personas generate-conversions test clean vcm-train vcm-bench vcm-eval optionb-train optionb-eval stream wakeword-fetch-positives wakeword-fetch-positives-dry-run wakeword-convert-positives wakeword-convert-positives-dry-run wakeword-generate-silence wakeword-generate-silence-dry-run wakeword-generate-adversaries wakeword-generate-adversaries-dry-run wakeword-mix-noise wakeword-mix-noise-dry-run wakeword-consolidate-manifest
 
 WAKEWORD_CLONE_DIR ?= $(if $(TMPDIR),$(TMPDIR),/tmp)/me2_wakeword_clone
 WAKEWORD_POSITIVES_OUT_DIR ?= out/conversions/v2/wakeword/positives_real
@@ -181,6 +181,12 @@ wakeword-mix-noise:
 
 wakeword-mix-noise-dry-run:
 	$(UV) run python -m me2_voicegen.wakeword.mix_background_noise --wakeword-root "$(WAKEWORD_ROOT)" --noise-root "$(WAKEWORD_NOISE_ROOT)" --noise-prob $(WAKEWORD_NOISE_PROB) --seed $(WAKEWORD_NOISE_SEED) --dry-run
+
+# `consolidate_manifest.py` -- flat merge of every subset generated so far
+# into out/conversions/v2/wakeword/generated_manifest.csv. NOT ticket 04's
+# final assembled dataset (no external corpora, no split assignment).
+wakeword-consolidate-manifest:
+	$(UV) run python -m me2_voicegen.wakeword.consolidate_manifest --wakeword-root "$(WAKEWORD_ROOT)"
 
 test:
 	$(UV) run pytest
