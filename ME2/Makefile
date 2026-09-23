@@ -37,7 +37,7 @@ STREAM_BACKEND ?= onnx
 STREAM_SOURCE ?= mic
 STREAM_ARGS ?=
 
-.PHONY: sync vendor download-model generate generate-personas generate-conversions test clean vcm-train vcm-bench vcm-eval optionb-train optionb-eval stream wakeword-fetch-positives wakeword-fetch-positives-dry-run wakeword-convert-positives wakeword-convert-positives-dry-run wakeword-generate-silence wakeword-generate-silence-dry-run wakeword-generate-adversaries wakeword-generate-adversaries-dry-run wakeword-mix-noise wakeword-mix-noise-dry-run wakeword-consolidate-manifest
+.PHONY: sync vendor download-model generate generate-personas generate-conversions test clean vcm-train vcm-bench vcm-eval optionb-train optionb-eval stream wakeword-fetch-positives wakeword-fetch-positives-dry-run wakeword-convert-positives wakeword-convert-positives-dry-run wakeword-generate-silence wakeword-generate-silence-dry-run wakeword-generate-adversaries wakeword-generate-adversaries-dry-run wakeword-mix-noise wakeword-mix-noise-dry-run wakeword-consolidate-manifest wakeword-build-unknown-external wakeword-build-unknown-external-dry-run
 
 WAKEWORD_CLONE_DIR ?= $(if $(TMPDIR),$(TMPDIR),/tmp)/me2_wakeword_clone
 WAKEWORD_POSITIVES_OUT_DIR ?= out/conversions/v2/wakeword/positives_real
@@ -55,6 +55,10 @@ WAKEWORD_ROOT ?= out/conversions/v2/wakeword
 WAKEWORD_NOISE_ROOT ?= out/conversions/v2/background_noise
 WAKEWORD_NOISE_PROB ?= 0.35
 WAKEWORD_NOISE_SEED ?= 0
+WAKEWORD_COMMON_VOICE_ROOT ?= out/conversions/v2/common_voice_negative
+WAKEWORD_UNKNOWN_EXTERNAL_OUT_DIR ?= out/conversions/v2/wakeword/common_voice_negative_sample
+WAKEWORD_UNKNOWN_TARGET_COUNT ?= 5172
+WAKEWORD_UNKNOWN_SEED ?= 0
 
 sync:
 	$(UV) sync
@@ -187,6 +191,16 @@ wakeword-mix-noise-dry-run:
 # final assembled dataset (no external corpora, no split assignment).
 wakeword-consolidate-manifest:
 	$(UV) run python -m me2_voicegen.wakeword.consolidate_manifest --wakeword-root "$(WAKEWORD_ROOT)"
+
+# `build_unknown_external.py` -- scrubs common_voice_negative (CC0) for a
+# "computer" token, seeded-samples the remainder to WAKEWORD_UNKNOWN_TARGET_COUNT,
+# and writes common_voice_negative_sample/ (broadens `_unknown_` beyond
+# adversaries' phonetic near-misses; no license encumbrance).
+wakeword-build-unknown-external:
+	$(UV) run python -m me2_voicegen.wakeword.build_unknown_external --common-voice-root "$(WAKEWORD_COMMON_VOICE_ROOT)" --out-root "$(WAKEWORD_UNKNOWN_EXTERNAL_OUT_DIR)" --target-count $(WAKEWORD_UNKNOWN_TARGET_COUNT) --seed $(WAKEWORD_UNKNOWN_SEED)
+
+wakeword-build-unknown-external-dry-run:
+	$(UV) run python -m me2_voicegen.wakeword.build_unknown_external --common-voice-root "$(WAKEWORD_COMMON_VOICE_ROOT)" --out-root "$(WAKEWORD_UNKNOWN_EXTERNAL_OUT_DIR)" --target-count $(WAKEWORD_UNKNOWN_TARGET_COUNT) --seed $(WAKEWORD_UNKNOWN_SEED) --dry-run
 
 test:
 	$(UV) run pytest
