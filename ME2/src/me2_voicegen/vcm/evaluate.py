@@ -166,6 +166,23 @@ class RowResult:
     required-command-margin gate rejected the row) -- `None` whenever the
     gate was disabled or the row was not rejected by the gate, so the value
     is JSON-safe either way."""
+    incomplete_prefix: str | None = None
+    """The winning designated incomplete-prefix text from the beam search,
+    or `None` if no designated prefix was present in the final beam --
+    populated regardless of whether the required-command-margin gate was
+    enabled for this decode."""
+    incomplete_gap: float | None = None
+    """`command_raw_score - incomplete_raw_score` (raw, unnormalized beam
+    log mass), or `None` if either side was absent. Computed before the
+    gate branch, so a decode at `required_command_margin=None` still
+    yields the gap a live gated decode at any other margin would have used
+    to decide accept/reject."""
+    command_raw_score: float | None = None
+    """The best completed-command terminal's raw beam log mass, or `None`
+    if no terminal was reached."""
+    incomplete_raw_score: float | None = None
+    """The strongest designated incomplete-prefix beam's raw log mass, or
+    `None` if none was present."""
 
 
 @torch.no_grad()
@@ -213,6 +230,10 @@ def decode_split(
                 source_dataset=row.get("source_dataset"),
                 slots=decoded.slots,
                 rejection_reason=decoded.rejection_reason,
+                incomplete_prefix=decoded.incomplete_prefix,
+                incomplete_gap=decoded.incomplete_gap,
+                command_raw_score=decoded.command_raw_score,
+                incomplete_raw_score=decoded.incomplete_raw_score,
             )
         )
     return results
@@ -262,6 +283,75 @@ def sweep_thresholds(
                 "n_reject_probes": len(reject_idxs),
                 "false_accept_rate": false_rate,
                 "youden_j": target_rate - false_rate,
+            }
+        )
+    return sweep
+
+
+def sweep_margins(
+    results: list[RowResult], margins: tuple[float, ...], threshold: float
+) -> list[dict]:
+    """Sweep candidate `required_command_margin` values against
+    already-decoded results. Precondition: `results` must come from a
+    decode run with `required_command_margin=None` (the gate disabled), so
+    `incomplete_gap` reflects the true baseline gap for every candidate
+    margin -- pure arithmetic, no re-decoding. Violating this precondition
+    raises `ValueError` (see below). Mirrors `sweep_thresholds`'s shape:
+    `target_accept_rate` over `TARGET_BUCKET` rows and `false_accept_rate`
+    over `REJECT_PROBE_BUCKETS` rows, both gated by `_accepted(row,
+    threshold)` AND the margin gate (`incomplete_gap is None or
+    incomplete_gap >= margin`). `incomplete_prefix_reject_rate` additionally
+    isolates, among `TARGET_BUCKET` rows that would be accepted on the
+    confidence gate alone, the fraction the margin gate specifically
+    rejects.
+
+    Raises:
+        ValueError: if any row has `rejection_reason is not None` --
+            `rejection_reason` is only ever set when the gate was actually
+            enabled at decode time (decoder.py never sets it on the
+            `required_command_margin=None` path), so its presence on any
+            row proves this batch was not decoded with the gate disabled.
+    """
+    if any(r.rejection_reason is not None for r in results):
+        raise ValueError(
+            "sweep_margins requires results decoded with required_command_margin=None "
+            "(the incomplete-prefix gate disabled) -- found a row with rejection_reason set, "
+            "meaning the gate was already active at decode time."
+        )
+
+    target_idxs = [i for i, r in enumerate(results) if r.bucket == TARGET_BUCKET]
+    reject_idxs = [i for i, r in enumerate(results) if r.bucket in REJECT_PROBE_BUCKETS]
+
+    def _margin_ok(r: RowResult, margin: float) -> bool:
+        return r.incomplete_gap is None or r.incomplete_gap >= margin
+
+    sweep: list[dict] = []
+    for margin in margins:
+        target_accepts = sum(
+            1 for i in target_idxs if _accepted(results[i], threshold) and _margin_ok(results[i], margin)
+        )
+        reject_accepts = sum(
+            1 for i in reject_idxs if _accepted(results[i], threshold) and _margin_ok(results[i], margin)
+        )
+        target_rate = target_accepts / len(target_idxs) if target_idxs else 0.0
+        false_rate = reject_accepts / len(reject_idxs) if reject_idxs else 0.0
+
+        confidence_accepted_idxs = [i for i in target_idxs if _accepted(results[i], threshold)]
+        margin_rejected = sum(
+            1
+            for i in confidence_accepted_idxs
+            if results[i].incomplete_gap is not None and results[i].incomplete_gap < margin
+        )
+        incomplete_prefix_reject_rate = (
+            margin_rejected / len(confidence_accepted_idxs) if confidence_accepted_idxs else 0.0
+        )
+
+        sweep.append(
+            {
+                "margin": margin,
+                "target_accept_rate": target_rate,
+                "false_accept_rate": false_rate,
+                "incomplete_prefix_reject_rate": incomplete_prefix_reject_rate,
             }
         )
     return sweep

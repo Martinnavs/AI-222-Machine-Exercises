@@ -600,3 +600,74 @@ def test_digit_form_twin_phrases_decode_with_gate_disabled(text, intent, slots):
     assert result.intent == twin_intent
     assert result.slots == twin_slots
     assert result.rejection_reason is None
+
+
+# ---------------------------------------------------------------------------
+# Cross-cutting regression (test-engineer, R2-2): one baseline decode
+# (required_command_margin=None) plus evaluate.sweep_margins's own formula
+# (`incomplete_gap is None or incomplete_gap >= margin`, AND'd with the
+# confidence threshold) must predict EXACTLY what a live re-decode at that
+# margin does. This is the whole premise the R2-2 fix (avoiding a re-decode
+# per candidate margin) depends on -- validated here against the real
+# `decode_utterance` beam search, not a fabricated RowResult.
+# ---------------------------------------------------------------------------
+
+
+def _predict_accept(baseline: dec.DecodeResult, threshold: float, margin: float) -> bool:
+    margin_ok = baseline.incomplete_gap is None or baseline.incomplete_gap >= margin
+    confidence_ok = baseline.intent is not None and baseline.confidence >= threshold
+    return margin_ok and confidence_ok
+
+
+@pytest.mark.parametrize("total_frames", [151])
+@pytest.mark.parametrize(
+    "margin_name",
+    ["reject_margin", "tie_margin", "accept_margin"],
+)
+def test_sweep_margins_formula_matches_live_gated_decode(total_frames, margin_name):
+    threshold = -0.1
+    beam_width = 50
+    logp = make_color_broken_posterior(total_frames)
+
+    baseline = dec.decode_utterance(
+        logp,
+        OPTIONB_GRAMMAR,
+        threshold=threshold,
+        beam_width=beam_width,
+        required_command_margin=None,
+    )
+    assert not baseline.no_match
+    assert baseline.incomplete_gap == pytest.approx(GAP_EXPECTED, abs=1e-6)
+
+    margins = {
+        # gap (~-1.41) < 0.0 -> the margin gate must reject.
+        "reject_margin": 0.0,
+        # exact tie: decoder.py's own gate rejects on strict `<`, so a tie
+        # must be ACCEPTED by the margin gate (not rejected).
+        "tie_margin": baseline.incomplete_gap,
+        # gap >= -10.0 -> the margin gate must accept.
+        "accept_margin": -10.0,
+    }
+    margin = margins[margin_name]
+
+    predicted_accept = _predict_accept(baseline, threshold, margin)
+
+    live = dec.decode_utterance(
+        logp,
+        OPTIONB_GRAMMAR,
+        threshold=threshold,
+        beam_width=beam_width,
+        required_command_margin=margin,
+    )
+
+    assert (not live.no_match) == predicted_accept, (
+        f"margin={margin!r} ({margin_name}): predicted accept={predicted_accept} "
+        f"but live decode no_match={live.no_match}"
+    )
+    if predicted_accept:
+        assert live.rejection_reason is None
+        assert live.intent == baseline.intent
+        assert live.slots == baseline.slots
+    else:
+        assert live.rejection_reason == "incomplete_prefix"
+        assert live.intent is None

@@ -31,6 +31,7 @@ from me2_voicegen.vcm.evaluate import (
     render_markdown,
     slot_accuracy_breakdown,
     speaker_group_breakdown,
+    sweep_margins,
     sweep_thresholds,
 )
 from me2_voicegen.vcm.optiona.grammar import TOY_GRAMMAR
@@ -134,6 +135,134 @@ def test_choose_operating_threshold_ties_break_toward_least_permissive():
     ]
     chosen = choose_operating_threshold(sweep)
     assert chosen["threshold"] == -0.1
+
+
+# ---------------------------------------------------------------------------
+# RowResult's incomplete-prefix-gate diagnostic fields (R2-2) / sweep_margins
+# ---------------------------------------------------------------------------
+
+
+def test_row_result_incomplete_gate_fields_default_to_none():
+    row = _row("target_commands", "CALL", "CALL", -0.1)
+    assert row.incomplete_prefix is None
+    assert row.incomplete_gap is None
+    assert row.command_raw_score is None
+    assert row.incomplete_raw_score is None
+
+
+def test_row_result_accepts_incomplete_gate_fields():
+    row = RowResult(
+        index=0,
+        bucket="target_commands",
+        label="CALL",
+        text="call",
+        intent="CALL",
+        confidence=-0.1,
+        incomplete_prefix="cal",
+        incomplete_gap=0.5,
+        command_raw_score=-1.0,
+        incomplete_raw_score=-1.5,
+    )
+    assert row.incomplete_prefix == "cal"
+    assert row.incomplete_gap == 0.5
+    assert row.command_raw_score == -1.0
+    assert row.incomplete_raw_score == -1.5
+
+
+def _margin_row(bucket, confidence, incomplete_gap, index=0):
+    return RowResult(
+        index=index,
+        bucket=bucket,
+        label="CALL",
+        text="",
+        intent="CALL" if confidence is not None else None,
+        confidence=confidence,
+        incomplete_gap=incomplete_gap,
+    )
+
+
+def test_sweep_margins_computes_rates_by_construction():
+    results = [
+        _margin_row("target_commands", -0.1, 1.0, index=0),
+        _margin_row("target_commands", -0.1, 0.5, index=1),
+        _margin_row("target_commands", -0.1, 0.2, index=2),
+        _margin_row("target_commands", -0.1, None, index=3),
+        _margin_row("babble", -0.1, 0.1, index=4),
+        _margin_row("silence", -0.1, 0.9, index=5),
+    ]
+
+    sweep = sweep_margins(results, margins=(0.0, 0.6), threshold=-0.3)
+    by_margin = {row["margin"]: row for row in sweep}
+
+    # margin=0.0: every row's incomplete_gap >= 0.0 (or None), so nothing is
+    # rejected by the margin gate -- all 4 target rows and both reject-probe
+    # rows pass through unaffected.
+    assert by_margin[0.0]["target_accept_rate"] == pytest.approx(1.0)
+    assert by_margin[0.0]["false_accept_rate"] == pytest.approx(1.0)
+    assert by_margin[0.0]["incomplete_prefix_reject_rate"] == pytest.approx(0.0)
+
+    # margin=0.6: rows with gap 0.5 and 0.2 (2 of 4 target rows) are
+    # rejected by the margin gate; gap=None (index 3) is never rejected;
+    # gap=1.0 (index 0) passes. -> 2/4 target rows accepted.
+    assert by_margin[0.6]["target_accept_rate"] == pytest.approx(2 / 4)
+    assert by_margin[0.6]["incomplete_prefix_reject_rate"] == pytest.approx(2 / 4)
+    # babble row's gap=0.1 < 0.6 -> rejected; silence row's gap=0.9 >= 0.6 -> accepted.
+    assert by_margin[0.6]["false_accept_rate"] == pytest.approx(0.5)
+
+
+def test_sweep_margins_empty_bucket_yields_zero_rate_not_zerodiv():
+    results = [_margin_row("target_commands", -0.1, 1.0)]
+    sweep = sweep_margins(results, margins=(0.0,), threshold=-0.3)
+    assert sweep[0]["false_accept_rate"] == 0.0
+    assert sweep[0]["incomplete_prefix_reject_rate"] == pytest.approx(0.0)
+
+
+def test_sweep_margins_no_competing_prefix_beam_never_rejected():
+    row = _margin_row("target_commands", -0.1, None)
+    sweep = sweep_margins([row], margins=(0.0, 5.0, 1000.0), threshold=-0.3)
+    assert all(entry["target_accept_rate"] == pytest.approx(1.0) for entry in sweep)
+    assert all(entry["incomplete_prefix_reject_rate"] == pytest.approx(0.0) for entry in sweep)
+
+
+def test_sweep_margins_rejects_input_already_decoded_with_gate_enabled():
+    results = [
+        _margin_row("target_commands", -0.1, 1.0, index=0),
+        RowResult(
+            index=1,
+            bucket="target_commands",
+            label="CALL",
+            text="",
+            intent=None,
+            confidence=None,
+            rejection_reason="incomplete_prefix",
+        ),
+    ]
+    with pytest.raises(ValueError):
+        sweep_margins(results, margins=(0.0,), threshold=-0.3)
+
+
+def test_sweep_margins_valid_input_with_rejection_reason_none_is_unaffected():
+    results = [
+        _margin_row("target_commands", -0.1, 1.0, index=0),
+        _margin_row("target_commands", -0.1, 0.5, index=1),
+    ]
+    assert all(r.rejection_reason is None for r in results)
+    sweep = sweep_margins(results, margins=(0.0, 0.6), threshold=-0.3)
+    by_margin = {row["margin"]: row for row in sweep}
+    assert by_margin[0.0]["target_accept_rate"] == pytest.approx(1.0)
+    assert by_margin[0.6]["target_accept_rate"] == pytest.approx(0.5)
+
+
+def test_sweep_margins_exact_gap_margin_tie_is_accepted():
+    # decoder.py's own gate rejects on strict `<` (incomplete_gap <
+    # required_command_margin), so an exact tie (gap == margin) must NOT be
+    # rejected. sweep_margins's `_margin_ok` uses `>=`, matching that -- but
+    # no existing test exercised gap == margin exactly (prior cases only use
+    # margins that are strictly above or below every fixture gap).
+    row = _margin_row("target_commands", -0.1, 0.6)
+    sweep = sweep_margins([row], margins=(0.6,), threshold=-0.3)
+    assert sweep[0]["target_accept_rate"] == pytest.approx(1.0)
+    assert sweep[0]["incomplete_prefix_reject_rate"] == pytest.approx(0.0)
 
 
 # ---------------------------------------------------------------------------
@@ -911,6 +1040,58 @@ def test_decode_split_threads_required_command_margin(monkeypatch, vcm_fake_mani
         assert len(calls) == len(val_dataset)
         assert all(c == margin for c in calls)
         assert all(r.rejection_reason is None for r in results)
+
+
+def test_decode_split_threads_incomplete_gate_diagnostic_fields(monkeypatch, vcm_fake_manifest_factory):
+    import me2_voicegen.vcm.dataset as dataset_mod
+    import me2_voicegen.vcm.evaluate as evaluate_mod
+
+    from me2_voicegen.vcm.decoder import DecodeResult
+
+    manifest_path = _build_main_manifest(vcm_fake_manifest_factory)
+    val_dataset = dataset_mod.VCMDataset(manifest_path, split="val", augmenter=None)
+
+    def _fake_infer_waveform(
+        model,
+        feature_extractor,
+        waveform,
+        grammar,
+        threshold,
+        beam_width=50,
+        device="cpu",
+        required_command_margin=None,
+    ):
+        return DecodeResult(
+            intent="CALL",
+            slots={},
+            text="call",
+            confidence=-0.1,
+            no_match=False,
+            out_of_grammar_gap=0.0,
+            rejection_reason=None,
+            incomplete_prefix="cal",
+            incomplete_gap=0.5,
+            command_raw_score=-1.0,
+            incomplete_raw_score=-1.5,
+        )
+
+    monkeypatch.setattr(evaluate_mod, "infer_waveform", _fake_infer_waveform)
+
+    results = evaluate_mod.decode_split(
+        None,
+        None,
+        val_dataset,
+        TOY_GRAMMAR,
+        beam_width=50,
+        device="cpu",
+        required_command_margin=None,
+    )
+    assert len(results) == len(val_dataset)
+    for row in results:
+        assert row.incomplete_prefix == "cal"
+        assert row.incomplete_gap == 0.5
+        assert row.command_raw_score == -1.0
+        assert row.incomplete_raw_score == -1.5
 
 
 def test_incomplete_prefix_rejection_counts_helper():
