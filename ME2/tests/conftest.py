@@ -9,6 +9,7 @@ import torchaudio
 
 import me2_voicegen.generation.cosyvoice_env as cosyvoice_env
 import me2_voicegen.vcm.text as vcm_text
+from me2_voicegen.wakeword.fetch_positives import MANIFEST_FIELDS as WAKEWORD_MANIFEST_FIELDS
 
 
 @pytest.fixture
@@ -238,3 +239,76 @@ def vcm_stub_model_factory():
         return _StubCTCModel(alphabet_size=alphabet_size, forced_ids=forced_ids, peak=peak)
 
     return make
+
+
+# ---------------------------------------------------------------------------
+# Shared wakeword fixture (owned by feature `wakeword-computer-dataset` ticket
+# 01). Tickets 03/04 both depend on this fixture existing here with this
+# shape -- don't invent competing per-test-file versions. See
+# ME2/docs/WAKEWORD-DATASET-CONTRACT.md for the manifest schema this stands
+# in for.
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def wakeword_fake_manifest_factory(tmp_path, vcm_wav_factory):
+    """Factory: build a small synthetic wakeword `manifest.csv` (real
+    10-column schema, per docs/WAKEWORD-DATASET-CONTRACT.md section 2)
+    plus matching audio files, under a throwaway subset directory.
+
+    `build(specs, subset_name="positives_real")` takes a list of dicts,
+    one per manifest row, each with:
+      - `source_dataset` (str, default "picovoice")
+      - `label` (str, default "_wakeword_")
+      - `duration_s` (float, default 0.5)
+      - `filename` (str, default f"{i:05d}.wav")
+      - `source_relpath` (str, default f"{source_dataset}/{filename}")
+      - `group_id` (str, default the filename's stem)
+      - `split` (str, default "" -- unassigned, per contract section 2)
+      - `silence` (bool, default False) -- written straight through to
+        `vcm_wav_factory`.
+
+    Returns the built `manifest.csv` Path; audio lives alongside it at
+    `audio/<source_dataset>/<filename>`, matching the real output layout
+    (docs/WAKEWORD-DATASET-CONTRACT.md section 6).
+    """
+
+    def build(specs: list[dict], subset_name: str = "positives_real") -> Path:
+        root = tmp_path / f"fake_wakeword_{subset_name}"
+        root.mkdir(exist_ok=True, parents=True)
+
+        rows: list[dict] = []
+        for i, spec in enumerate(specs):
+            source_dataset = spec.get("source_dataset", "picovoice")
+            filename = spec.get("filename", f"{i:05d}.wav")
+            duration_s = spec.get("duration_s", 0.5)
+            rel_path = f"audio/{source_dataset}/{filename}"
+
+            vcm_wav_factory(
+                root / rel_path, duration_s=duration_s, silence=spec.get("silence", False)
+            )
+
+            rows.append(
+                {
+                    "filename": filename,
+                    "path": rel_path,
+                    "label": spec.get("label", "_wakeword_"),
+                    "duration": f"{duration_s:.6f}",
+                    "sample_rate": "16000",
+                    "resampled": "False",
+                    "source_dataset": source_dataset,
+                    "source_relpath": spec.get("source_relpath", f"{source_dataset}/{filename}"),
+                    "group_id": spec.get("group_id", Path(filename).stem),
+                    "split": spec.get("split", ""),
+                }
+            )
+
+        manifest_path = root / "manifest.csv"
+        with manifest_path.open("w", newline="", encoding="utf-8") as f:
+            writer = csv.DictWriter(f, fieldnames=WAKEWORD_MANIFEST_FIELDS)
+            writer.writeheader()
+            writer.writerows(rows)
+
+        return manifest_path
+
+    return build

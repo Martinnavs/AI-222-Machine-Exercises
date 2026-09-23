@@ -37,7 +37,10 @@ STREAM_BACKEND ?= onnx
 STREAM_SOURCE ?= mic
 STREAM_ARGS ?=
 
-.PHONY: sync vendor download-model generate generate-personas generate-conversions test clean vcm-train vcm-bench vcm-eval optionb-train optionb-eval stream
+.PHONY: sync vendor download-model generate generate-personas generate-conversions test clean vcm-train vcm-bench vcm-eval optionb-train optionb-eval stream wakeword-fetch-positives wakeword-fetch-positives-dry-run
+
+WAKEWORD_CLONE_DIR ?= $(if $(TMPDIR),$(TMPDIR),/tmp)/me2_wakeword_clone
+WAKEWORD_POSITIVES_OUT_DIR ?= out/conversions/v2/wakeword/positives_real
 
 sync:
 	$(UV) sync
@@ -96,6 +99,29 @@ stream:
 
 stream-single-period:
 	$(MAKE) stream STREAM_ARGS="--policy single_period --gate spacebar --gate-period 3 --threshold -0.132222 --log-periods"
+
+# Wakeword ("computer"-only) dataset-build targets. See
+# docs/WAKEWORD-DATASET-CONTRACT.md for the manifest schema/output layout
+# `fetch_positives.py` (ticket 01) produces; later tickets (02/03/04/05)
+# add their own subset-fetch/convert/assemble targets alongside these.
+#
+# `?=` above does not repopulate a variable that is defined-but-empty (e.g.
+# `make wakeword-fetch-positives WAKEWORD_POSITIVES_OUT_DIR=`), which would
+# otherwise silently pass `--out-root ""` through to a tool that can rmtree
+# that path (security-auditor finding R2-1) -- `fetch_positives.py` itself
+# now refuses an empty/`.`-resolving --out-root/--clone-dir, but these two
+# checks below fail the `make` invocation itself, before even launching
+# python, as a second independent guard on the exact variables this
+# Makefile exposes as overridable.
+wakeword-fetch-positives:
+	@test -n "$(strip $(WAKEWORD_CLONE_DIR))" || { echo "WAKEWORD_CLONE_DIR must not be empty" >&2; exit 1; }
+	@test -n "$(strip $(WAKEWORD_POSITIVES_OUT_DIR))" || { echo "WAKEWORD_POSITIVES_OUT_DIR must not be empty" >&2; exit 1; }
+	$(UV) run python -m me2_voicegen.wakeword.fetch_positives --clone-dir "$(WAKEWORD_CLONE_DIR)" --out-root "$(WAKEWORD_POSITIVES_OUT_DIR)"
+
+wakeword-fetch-positives-dry-run:
+	@test -n "$(strip $(WAKEWORD_CLONE_DIR))" || { echo "WAKEWORD_CLONE_DIR must not be empty" >&2; exit 1; }
+	@test -n "$(strip $(WAKEWORD_POSITIVES_OUT_DIR))" || { echo "WAKEWORD_POSITIVES_OUT_DIR must not be empty" >&2; exit 1; }
+	$(UV) run python -m me2_voicegen.wakeword.fetch_positives --clone-dir "$(WAKEWORD_CLONE_DIR)" --out-root "$(WAKEWORD_POSITIVES_OUT_DIR)" --dry-run
 
 test:
 	$(UV) run pytest
