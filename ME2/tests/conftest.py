@@ -267,6 +267,15 @@ def wakeword_fake_manifest_factory(tmp_path, vcm_wav_factory):
       - `split` (str, default "" -- unassigned, per contract section 2)
       - `silence` (bool, default False) -- written straight through to
         `vcm_wav_factory`.
+      - `ref_voice` / `noise_source_file` / `snr_db` / `speech_start_s` /
+        `speech_end_s` (str, no default) -- optional per-subset extension
+        columns (contract section 2; `speech_start_s`/`speech_end_s` added
+        for feature `wakeword-dscnn`, section 8). Only added to the
+        written manifest's column set at all if at least one spec in this
+        `build()` call sets one, so a caller building a plain 10-column
+        subset sees exactly the same output as before this extension was
+        added; specs that omit an extension key some other spec in the
+        same call sets get `""` for it.
 
     Returns the built `manifest.csv` Path; audio lives alongside it at
     `audio/<source_dataset>/<filename>`, matching the real output layout
@@ -276,6 +285,13 @@ def wakeword_fake_manifest_factory(tmp_path, vcm_wav_factory):
     def build(specs: list[dict], subset_name: str = "positives_real") -> Path:
         root = tmp_path / f"fake_wakeword_{subset_name}"
         root.mkdir(exist_ok=True, parents=True)
+
+        extension_keys = [
+            key
+            for key in ("ref_voice", "noise_source_file", "snr_db", "speech_start_s", "speech_end_s")
+            if any(key in spec for spec in specs)
+        ]
+        fieldnames = WAKEWORD_MANIFEST_FIELDS + extension_keys
 
         rows: list[dict] = []
         for i, spec in enumerate(specs):
@@ -288,24 +304,25 @@ def wakeword_fake_manifest_factory(tmp_path, vcm_wav_factory):
                 root / rel_path, duration_s=duration_s, silence=spec.get("silence", False)
             )
 
-            rows.append(
-                {
-                    "filename": filename,
-                    "path": rel_path,
-                    "label": spec.get("label", "_wakeword_"),
-                    "duration": f"{duration_s:.6f}",
-                    "sample_rate": "16000",
-                    "resampled": "False",
-                    "source_dataset": source_dataset,
-                    "source_relpath": spec.get("source_relpath", f"{source_dataset}/{filename}"),
-                    "group_id": spec.get("group_id", Path(filename).stem),
-                    "split": spec.get("split", ""),
-                }
-            )
+            row = {
+                "filename": filename,
+                "path": rel_path,
+                "label": spec.get("label", "_wakeword_"),
+                "duration": f"{duration_s:.6f}",
+                "sample_rate": "16000",
+                "resampled": "False",
+                "source_dataset": source_dataset,
+                "source_relpath": spec.get("source_relpath", f"{source_dataset}/{filename}"),
+                "group_id": spec.get("group_id", Path(filename).stem),
+                "split": spec.get("split", ""),
+            }
+            for key in extension_keys:
+                row[key] = spec.get(key, "")
+            rows.append(row)
 
         manifest_path = root / "manifest.csv"
         with manifest_path.open("w", newline="", encoding="utf-8") as f:
-            writer = csv.DictWriter(f, fieldnames=WAKEWORD_MANIFEST_FIELDS)
+            writer = csv.DictWriter(f, fieldnames=fieldnames)
             writer.writeheader()
             writer.writerows(rows)
 

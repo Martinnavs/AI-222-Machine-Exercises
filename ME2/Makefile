@@ -37,7 +37,7 @@ STREAM_BACKEND ?= onnx
 STREAM_SOURCE ?= mic
 STREAM_ARGS ?=
 
-.PHONY: sync vendor download-model generate generate-personas generate-conversions test clean vcm-train vcm-bench vcm-eval optionb-train optionb-eval stream wakeword-fetch-positives wakeword-fetch-positives-dry-run wakeword-convert-positives wakeword-convert-positives-dry-run wakeword-generate-silence wakeword-generate-silence-dry-run wakeword-generate-adversaries wakeword-generate-adversaries-dry-run wakeword-mix-noise wakeword-mix-noise-dry-run wakeword-consolidate-manifest wakeword-build-unknown-external wakeword-build-unknown-external-dry-run wakeword-build-dataset
+.PHONY: sync vendor download-model generate generate-personas generate-conversions test clean vcm-train vcm-bench vcm-eval optionb-train optionb-eval stream wakeword-fetch-positives wakeword-fetch-positives-dry-run wakeword-convert-positives wakeword-convert-positives-dry-run wakeword-generate-silence wakeword-generate-silence-dry-run wakeword-generate-adversaries wakeword-generate-adversaries-dry-run wakeword-mix-noise wakeword-mix-noise-dry-run wakeword-consolidate-manifest wakeword-build-unknown-external wakeword-build-unknown-external-dry-run wakeword-build-dataset wakeword-derive-spans wakeword-train
 
 WAKEWORD_CLONE_DIR ?= $(if $(TMPDIR),$(TMPDIR),/tmp)/me2_wakeword_clone
 WAKEWORD_POSITIVES_OUT_DIR ?= out/conversions/v2/wakeword/positives_real
@@ -60,6 +60,14 @@ WAKEWORD_UNKNOWN_EXTERNAL_OUT_DIR ?= out/conversions/v2/wakeword/common_voice_ne
 WAKEWORD_UNKNOWN_TARGET_COUNT ?= 5172
 WAKEWORD_UNKNOWN_SEED ?= 0
 WAKEWORD_BUILD_SEED ?= 0
+
+WAKEWORD_TRAIN_MANIFEST ?= out/conversions/v2/wakeword/manifest.csv
+WAKEWORD_TRAIN_OUT_DIR ?= out/wakeword
+WAKEWORD_PRESET ?= default
+WAKEWORD_DEVICE ?= cpu
+WAKEWORD_MAX_MINUTES ?= 30
+WAKEWORD_TRAIN_SEED ?= 0
+WAKEWORD_NOISE_ROOT_TRAIN ?= out/conversions/v2/background_noise
 
 sync:
 	$(UV) sync
@@ -211,6 +219,21 @@ wakeword-build-unknown-external-dry-run:
 # the intended class composition) before this.
 wakeword-build-dataset:
 	$(UV) run python -m me2_voicegen.wakeword.build_dataset --wakeword-root "$(WAKEWORD_ROOT)" --seed $(WAKEWORD_BUILD_SEED)
+
+# Feature `wakeword-dscnn` (feature-engineering/wakeword-dscnn/SPEC.md):
+# DS-CNN keyword-spotting classifier training/export/benchmark, on top of
+# the dataset-build targets above. `wakeword-derive-spans` must run once
+# after wakeword-build-dataset (or after any re-run of it) and before
+# wakeword-train -- it writes speech_start_s/speech_end_s into the
+# _wakeword_ chain + common_voice_negative_sample's own subset manifests;
+# re-run wakeword-build-dataset afterward to carry those columns into the
+# final assembled manifest.csv. adversaries/adversaries_noisy are
+# deliberately untouched (SPEC.md round 3).
+wakeword-derive-spans:
+	$(UV) run python -m me2_voicegen.wakeword.derive_speech_spans --wakeword-root "$(WAKEWORD_ROOT)"
+
+wakeword-train:
+	$(UV) run python -m me2_voicegen.wakeword.train --manifest "$(WAKEWORD_TRAIN_MANIFEST)" --out-dir "$(WAKEWORD_TRAIN_OUT_DIR)" --preset $(WAKEWORD_PRESET) --device $(WAKEWORD_DEVICE) --max-minutes $(WAKEWORD_MAX_MINUTES) --seed $(WAKEWORD_TRAIN_SEED) --noise-root "$(WAKEWORD_NOISE_ROOT_TRAIN)"
 
 test:
 	$(UV) run pytest
