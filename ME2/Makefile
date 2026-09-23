@@ -37,7 +37,7 @@ STREAM_BACKEND ?= onnx
 STREAM_SOURCE ?= mic
 STREAM_ARGS ?=
 
-.PHONY: sync vendor download-model generate generate-personas generate-conversions test clean vcm-train vcm-bench vcm-eval optionb-train optionb-eval stream wakeword-fetch-positives wakeword-fetch-positives-dry-run wakeword-convert-positives wakeword-convert-positives-dry-run wakeword-generate-silence wakeword-generate-silence-dry-run wakeword-generate-adversaries wakeword-generate-adversaries-dry-run wakeword-mix-noise wakeword-mix-noise-dry-run wakeword-consolidate-manifest wakeword-build-unknown-external wakeword-build-unknown-external-dry-run
+.PHONY: sync vendor download-model generate generate-personas generate-conversions test clean vcm-train vcm-bench vcm-eval optionb-train optionb-eval stream wakeword-fetch-positives wakeword-fetch-positives-dry-run wakeword-convert-positives wakeword-convert-positives-dry-run wakeword-generate-silence wakeword-generate-silence-dry-run wakeword-generate-adversaries wakeword-generate-adversaries-dry-run wakeword-mix-noise wakeword-mix-noise-dry-run wakeword-consolidate-manifest wakeword-build-unknown-external wakeword-build-unknown-external-dry-run wakeword-build-dataset
 
 WAKEWORD_CLONE_DIR ?= $(if $(TMPDIR),$(TMPDIR),/tmp)/me2_wakeword_clone
 WAKEWORD_POSITIVES_OUT_DIR ?= out/conversions/v2/wakeword/positives_real
@@ -59,6 +59,7 @@ WAKEWORD_COMMON_VOICE_ROOT ?= out/conversions/v2/common_voice_negative
 WAKEWORD_UNKNOWN_EXTERNAL_OUT_DIR ?= out/conversions/v2/wakeword/common_voice_negative_sample
 WAKEWORD_UNKNOWN_TARGET_COUNT ?= 5172
 WAKEWORD_UNKNOWN_SEED ?= 0
+WAKEWORD_BUILD_SEED ?= 0
 
 sync:
 	$(UV) sync
@@ -201,6 +202,15 @@ wakeword-build-unknown-external:
 
 wakeword-build-unknown-external-dry-run:
 	$(UV) run python -m me2_voicegen.wakeword.build_unknown_external --common-voice-root "$(WAKEWORD_COMMON_VOICE_ROOT)" --out-root "$(WAKEWORD_UNKNOWN_EXTERNAL_OUT_DIR)" --target-count $(WAKEWORD_UNKNOWN_TARGET_COUNT) --seed $(WAKEWORD_UNKNOWN_SEED) --dry-run
+
+# `build_dataset.py` -- ticket 04's real final assembly: merges
+# positives_real/positives_converted/positives_converted_noisy (_wakeword_),
+# adversaries/adversaries_noisy/common_voice_negative_sample (_unknown_),
+# silence_synthetic (_silence_), then a group-disjoint 70/20/10 split. Run
+# wakeword-build-unknown-external and wakeword-generate-silence (sized to
+# the intended class composition) before this.
+wakeword-build-dataset:
+	$(UV) run python -m me2_voicegen.wakeword.build_dataset --wakeword-root "$(WAKEWORD_ROOT)" --seed $(WAKEWORD_BUILD_SEED)
 
 test:
 	$(UV) run pytest

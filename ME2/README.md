@@ -26,12 +26,11 @@ pipeline itself.
   the A100, with a fast unit-test suite plus one real end-to-end GPU test.
 
 **Explicitly NOT in scope (later work):**
-- The full synthetic-data-generation pipeline for the wake-word/KWS corpus.
 - Batch/looped generation over a **phrase list** — i.e. multiple *texts* in one run. Still not
   supported: `generate_personas.py` (below) synthesizes exactly one text per run, never a list of
   texts.
-- Phonetic adversaries (near-miss wake-word variants).
-- Noise/RIR augmentation of generated clips.
+- RIR (reverb) augmentation of generated clips at dataset-build time — still train-time-only, via
+  `common/augment.py`.
 - A second backend implementation (the interface is designed to make one easy to add later —
   see `docs/adding-a-tts-backend.md` — but none is implemented here).
 
@@ -40,6 +39,15 @@ pipeline itself.
   run, sharing one backend construction — see "Batch generation over personas" below. This is a
   different axis from the phrase-list batching above (personas vary, not text) and does not
   contradict it.
+- The "computer"-only wake-word/KWS dataset-build pipeline (`src/me2_voicegen/wakeword/`) — real
+  + voice-converted + noise-augmented positives, phonetic adversaries, scrubbed general negative
+  speech, and synthetic silence, assembled into a group-disjoint 70/20/10 split. See
+  `docs/WAKEWORD-DATASET-CONTRACT.md` (schema/licensing) and
+  `.scratch/wakeword-computer-dataset/HANDOFF.md` (build narrative + current state). Note: this
+  dataset is CC-BY-NC-SA-4.0-encumbered (non-commercial, share-alike) once its noise-augmented
+  rows are included — see the contract doc's licensing section before using or redistributing it.
+  Picking/training an actual KWS model (e.g. DS-CNN) on this dataset remains its own follow-up,
+  not done here.
 
 See `docs/raw_requirements/sources.md`, `docs/raw_requirements/potential_model_approach.md`,
 `docs/raw_requirements/voice_generation_approach.md`, and
