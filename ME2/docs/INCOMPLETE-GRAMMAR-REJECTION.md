@@ -423,6 +423,70 @@ This creates accented, microphone-realistic prefix speech while probing the
 blank-duration bug. Because forced alignment can fail or choose a poor boundary,
 quality checks are mandatory. Do not call a presumed WAV filename directly.
 
+### Probe-manifest contract
+
+Implemented by `vcm.optionb.incomplete_probes` (ticket 05); consumed by the
+calibration tool (ticket 06). Fixed here so both can be built in parallel
+against the same schema.
+
+Probe WAVs and their manifest are written under an `out/vcm/...` directory
+that is never the training manifest path (`OPTIONB_MANIFEST`); the tool
+refuses to write there. Columns, one row per (source row, designated
+prefix, trailing-silence bucket):
+
+| Column | Meaning |
+|---|---|
+| `filename` | probe WAV filename |
+| `path` | probe WAV path, relative to this manifest's own directory |
+| `bucket` | always `"incomplete_prefix"` |
+| `label` | always `""` -- these rows carry no accepted intent |
+| `split` | `val` or `test`, inherited from the source row |
+| `group_id` | source row's speaker id, for split/speaker-disjointness checks |
+| `source_dataset` | always `"optionb_incomplete_probe"` |
+| `source_filename` | the source Option B clip's `filename` |
+| `source_path` | the source Option B clip's manifest `path` |
+| `source_transcript` | the exact normalized text passed to `force_align` |
+| `prefix` | the designated incomplete prefix this probe targets |
+| `prefix_word_count` | `len(prefix.split())` |
+| `char_overlap` | `bool`; always `False` for a written row -- recorded as an audit trail that the word-boundary check (not a bare substring check) gated selection |
+| `grace_frames` | the grace value used for this crop |
+| `crop_end_frame` | `min(last_char_frame + 1 + grace_frames, next_word_first_char_frame)` |
+| `crop_end_sample` | `crop_end_frame * HOP_LENGTH` |
+| `trailing_silence_s` | this probe's silence-bucket duration |
+| `silence_source` | `"lead_in_room_tone"`, `"tail_room_tone"`, `"digital_zero"` (no candidate cleared the relative-quietness bar), or `"none"` (0.0s bucket) |
+| `alignment_log_prob` | `ForcedAlignment.log_probability` for the source clip against `source_transcript` |
+| `aligner_checkpoint` | path to the checkpoint used for forced alignment |
+| `aligner_checkpoint_sha256` | sha256 of that checkpoint file |
+
+Trailing-silence padding is **not** blind tiling of "samples before
+`start_frame`", and existence of *a* candidate region is not sufficient
+either (R2-1 then R2-5, tickets/05's Review Feedback and its re-review): CTC
+spikes lag acoustic onset, so the frames immediately around `start_frame`/
+`end_frame` are often already speech, and a same-level-as-speech "silence"
+pad is an out-of-distribution shift on the whole utterance (`LogMelFeature
+Extractor` normalizes per-utterance), not a neutral one. `find_quiet_window`
+therefore searches **both** the lead-in (`[0, (start_frame - 20 frames) *
+HOP_LENGTH)`) and the tail (`[(end_frame + 1 + 20 frames) * HOP_LENGTH,
+len(waveform))`) for the minimum-RMS 100ms window, and accepts the winner
+only if its RMS is at least 20dB below the aligned speech span's own RMS;
+otherwise padding falls back to digital zero (`silence_source =
+"digital_zero"`). Because most 1.5-2s Option B clips do not have a long
+enough lead-in *or* tail to pass both the length and the 20dB bar, digital
+zero remains a substantial share of real runs -- see ticket 05's Execution
+Log for the measured `silence_source` distribution and ticket 06's
+per-`silence_source` metrics breakdown for how residual digital-zero share
+is surfaced in calibration reporting.
+
+`generation_report.json` carries `failure_counts` keyed by exactly, and
+always all four of: `force_align_error`, `no_gap` (no frame gap between the
+prefix's last character and the next word's first character),
+`crop_too_short` (crop shorter than 0.15s), and `missing_audio` --
+zero-filled when a reason had no occurrences. `audit_sample.csv` uses the
+same column schema, stratified to up to 3 distinct source rows per prefix,
+each represented by its *largest* silence-bucket variant (crop plus padded
+tail in one file) so a human listener hears the padding, not just the
+cropped prefix.
+
 For each margin candidate, report at least:
 
 - incomplete-prefix false acceptance rate, overall and by prefix;
