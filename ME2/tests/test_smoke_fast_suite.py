@@ -112,6 +112,7 @@ _OPTIONB_MODULES = [
     "me2_voicegen.vcm.optionb.text",
     "me2_voicegen.vcm.optionb.numbers",
     "me2_voicegen.vcm.optionb.grammar",
+    "me2_voicegen.vcm.optionb.incomplete_prefix_grammar",
 ]
 
 

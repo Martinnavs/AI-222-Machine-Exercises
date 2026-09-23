@@ -66,6 +66,18 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--policy", type=str, default=None)
     parser.add_argument("--grammar", type=str, default=None)
     parser.add_argument("--threshold", type=float, default=None)
+    parser.add_argument(
+        "--required-command-margin",
+        dest="required_command_margin",
+        type=float,
+        default=None,
+        help=(
+            "incomplete-prefix rejection gate margin (raw unnormalized beam "
+            "log-mass units; docs/INCOMPLETE-GRAMMAR-REJECTION.md). Omit to "
+            "leave the gate disabled; --threshold above stays an independent "
+            "gate"
+        ),
+    )
     parser.add_argument("--window-s", dest="window_s", type=float, default=None)
     parser.add_argument("--stride-s", dest="stride_s", type=float, default=None)
     parser.add_argument("--refractory-s", dest="refractory_s", type=float, default=None)
@@ -196,6 +208,7 @@ def _print_banner(
         f"  window_s={cfg.window_s} stride_s={cfg.stride_s} "
         f"refractory_s={cfg.refractory_s} beam_width={cfg.beam_width}",
         f"  resolved threshold: {threshold}",
+        f"  required_command_margin: {cfg.required_command_margin}",
         f"  license: {license_note}",
         f"  {gate_line}",
     ]
@@ -285,6 +298,7 @@ def main(argv: Optional[list[str]] = None) -> None:
         beam_width=cfg.beam_width,
         listen_for_s=cfg.listen_for,
         log_all_windows=cfg.log_all_windows,
+        required_command_margin=cfg.required_command_margin,
     )
     try:
         runner.run()

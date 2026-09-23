@@ -101,6 +101,7 @@ _FIELD_TYPES: dict[str, type] = {
     "gate": str,
     "gate_period_s": float,
     "log_periods": bool,
+    "required_command_margin": float,
 }
 
 _FIELD_CHOICES: dict[str, tuple[str, ...]] = {
@@ -109,7 +110,9 @@ _FIELD_CHOICES: dict[str, tuple[str, ...]] = {
     "gate": ("none", "spacebar"),
 }
 
-_NULLABLE_FIELDS = frozenset({"threshold", "mic_command", "listen_for"})
+_NULLABLE_FIELDS = frozenset(
+    {"threshold", "mic_command", "listen_for", "required_command_margin"}
+)
 
 
 def _coerce_field_value(name: str, value: Any) -> Any:
@@ -182,6 +185,7 @@ class StreamingConfig:
     gate: str = "none"
     gate_period_s: float = 5.0
     log_periods: bool = False
+    required_command_margin: Optional[float] = None
 
     @classmethod
     def from_json(cls, path: str | Path) -> "StreamingConfig":

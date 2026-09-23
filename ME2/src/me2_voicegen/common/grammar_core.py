@@ -119,6 +119,13 @@ class Grammar:
     name: str
     rules: dict[str, list[tuple[tuple[str, ...], dict, str]]]
     root: TrieNode = field(repr=False)
+    # Inference-only rejection metadata (docs/INCOMPLETE-GRAMMAR-REJECTION.md):
+    # designated whole-word prefixes such as "color" that may compete with
+    # completed commands during decoding. Defaults to empty, preserving every
+    # existing constructor/call site; grammars opt in explicitly (e.g.
+    # OPTIONB_GRAMMAR via `dataclasses.replace` in vcm.optionb.grammar).
+    # Never makes a prefix accepted: `accepts`/trie semantics are untouched.
+    incomplete_prefixes: frozenset[str] = field(default_factory=frozenset)
 
     def accepts(self, text: str) -> list[tuple[str, dict]] | None:
         """Direct string acceptance check (no CTC/decoder involved): walk
@@ -138,6 +145,29 @@ class Grammar:
         for alternatives in self.rules.values():
             for words, slots_, intent in alternatives:
                 yield " ".join(words), intent, slots_
+
+
+def derive_incomplete_prefixes(grammar: Grammar) -> frozenset[str]:
+    """Return non-command, proper whole-word prefixes of accepted phrases.
+
+    Grammar-generic (moved here from `vcm.optionb.incomplete_prefix_grammar`
+    per docs/INCOMPLETE-GRAMMAR-REJECTION.md's prefix-derivation spec). An
+    accepted command is never returned, even when it is a strict prefix of
+    another command. This preserves commands such as `"pause"` and `"time"`
+    while identifying incomplete slot-bearing phrases such as `"color"`.
+    Only whole-word prefixes belong in the set: character fragments such as
+    `"colo"` do not."""
+    accepted = {text for text, _, _ in grammar.all_phrases()}
+    prefixes: set[str] = set()
+
+    for phrase in accepted:
+        words = phrase.split()
+        for word_count in range(1, len(words)):
+            prefix = " ".join(words[:word_count])
+            if prefix not in accepted:
+                prefixes.add(prefix)
+
+    return frozenset(prefixes)
 
 
 def compile_grammar(name: str, rules: dict[str, list[tuple[tuple[str, ...], dict, str]]]) -> Grammar:

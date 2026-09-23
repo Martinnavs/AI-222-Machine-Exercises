@@ -114,6 +114,15 @@ flags (StreamingConfig.merge)`:
 - `log_periods: bool = False` -- per-period digest on stderr (gate
   open/close lines plus the period's consolidated result); the JSONL on
   stdout is unchanged (section 6).
+- `required_command_margin: Optional[float] = None` -- incomplete-prefix
+  rejection gate margin (raw unnormalized beam log-mass units;
+  docs/INCOMPLETE-GRAMMAR-REJECTION.md, Step 3). `None` (the default)
+  leaves the gate disabled and window-decode acceptance is exactly the
+  baseline; when set it is forwarded verbatim to every window's `decode()`
+  call (semantics: VCM-CONTRACT.md section 7, "Margin gate"). The startup
+  banner reports the resolved value; the JSONL schema (section 5) is
+  unchanged -- a gate rejection surfaces only as `intent: null` /
+  `confidence: null`.
 
 `MODEL_REGISTRY = {"optionc": out/vcm/optionb-optionc, "default":
 out/vcm/optionb}` (`optionc` is the config default -- it beats `default` on

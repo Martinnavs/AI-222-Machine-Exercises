@@ -837,3 +837,219 @@ def test_main_rejects_unknown_grammar_key(
                 "bogus",
             ]
         )
+
+
+# ---------------------------------------------------------------------------
+# required_command_margin plumbing (ticket 03 of
+# .scratch/incomplete-grammar-rejection/tickets, docs/
+# INCOMPLETE-GRAMMAR-REJECTION.md Step 3): evaluate CLI flag, decode_split
+# threading, the pure rejection-count helper, and the additive report keys.
+# ---------------------------------------------------------------------------
+
+
+def test_evaluate_cli_exposes_required_command_margin():
+    from me2_voicegen.vcm.evaluate import build_arg_parser
+
+    assert build_arg_parser().parse_args([]).required_command_margin is None
+    assert (
+        build_arg_parser().parse_args(["--required-command-margin", "0.5"]).required_command_margin
+        == 0.5
+    )
+    # negative margins are legal (a stricter gate); no range constraint here
+    assert (
+        build_arg_parser().parse_args(["--required-command-margin", "-0.5"]).required_command_margin
+        == -0.5
+    )
+
+
+def test_decode_split_threads_required_command_margin(monkeypatch, vcm_fake_manifest_factory):
+    import me2_voicegen.vcm.dataset as dataset_mod
+    import me2_voicegen.vcm.evaluate as evaluate_mod
+
+    from me2_voicegen.vcm.decoder import DecodeResult
+
+    manifest_path = _build_main_manifest(vcm_fake_manifest_factory)
+    val_dataset = dataset_mod.VCMDataset(manifest_path, split="val", augmenter=None)
+
+    calls: list = []
+
+    def _recording_infer_waveform(
+        model,
+        feature_extractor,
+        waveform,
+        grammar,
+        threshold,
+        beam_width=50,
+        device="cpu",
+        required_command_margin=None,
+    ):
+        calls.append(required_command_margin)
+        return DecodeResult(
+            intent=None,
+            slots={},
+            text="",
+            confidence=float("-inf"),
+            no_match=True,
+            out_of_grammar_gap=float("inf"),
+        )
+
+    monkeypatch.setattr(evaluate_mod, "infer_waveform", _recording_infer_waveform)
+
+    for margin in (None, 0.0):
+        calls.clear()
+        results = evaluate_mod.decode_split(
+            None,
+            None,
+            val_dataset,
+            TOY_GRAMMAR,
+            beam_width=50,
+            device="cpu",
+            required_command_margin=margin,
+        )
+        # one decode per row, margin threaded per row, no cross-row state
+        assert len(results) == len(val_dataset)
+        assert len(calls) == len(val_dataset)
+        assert all(c == margin for c in calls)
+        assert all(r.rejection_reason is None for r in results)
+
+
+def test_incomplete_prefix_rejection_counts_helper():
+    from me2_voicegen.vcm.evaluate import _incomplete_prefix_rejection_counts
+
+    def _row_with_reason(index, reason):
+        return RowResult(
+            index=index,
+            bucket="target_commands",
+            label="TIME",
+            text="color",
+            intent=None,
+            confidence=None,
+            rejection_reason=reason,
+        )
+
+    val = [
+        _row("target_commands", "CALL", "CALL", -0.1),
+        _row_with_reason(1, "incomplete_prefix"),
+        _row_with_reason(2, None),  # rejected by the confidence gate, not the margin gate
+    ]
+    test = [
+        _row_with_reason(0, "incomplete_prefix"),
+        _row_with_reason(1, "incomplete_prefix"),
+        _row("target_commands", "CALL", "CALL", -0.2),
+    ]
+    assert _incomplete_prefix_rejection_counts(val, test) == {"val": 1, "test": 2}
+
+
+def test_render_markdown_incomplete_prefix_rejections_line_only_when_margin_set():
+    section = _minimal_grammar_section("TOY_GRAMMAR")
+    report_base = {
+        "license_note": "CC-BY-NC-SA-4.0",
+        "checkpoint_path": "out/vcm/checkpoint.pt",
+        "checkpoint_meta": {"preset": "default", "epoch": 1, "val_loss": 1.0},
+        "manifest_path": "manifest.csv",
+        "device": "cpu",
+        "beam_width": 50,
+        "slot_eval_sections": None,
+        "slot_eval_skipped_reason": None,
+    }
+
+    # Key absent (old report / partial section dict): no line, renders as before.
+    md_absent = render_markdown({**report_base, "grammar_sections": [section]})
+    assert "incomplete-prefix gate rejections" not in md_absent
+
+    # Key present but margin disabled (None): no line.
+    section_off = {
+        **section,
+        "required_command_margin": None,
+        "incomplete_prefix_rejections": {"val": 0, "test": 0},
+    }
+    md_off = render_markdown({**report_base, "grammar_sections": [section_off]})
+    assert "incomplete-prefix gate rejections" not in md_off
+
+    # Key present and margin set: one bullet with both split counts.
+    section_on = {
+        **section,
+        "required_command_margin": 0.0,
+        "incomplete_prefix_rejections": {"val": 1, "test": 3},
+    }
+    md_on = render_markdown({**report_base, "grammar_sections": [section_on]})
+    assert "- incomplete-prefix gate rejections: val=1, test=3" in md_on
+
+
+def test_same_margin_across_evaluate_cli_streaming_config_and_decode(
+    tmp_path, monkeypatch, vcm_fake_manifest_factory
+):
+    """Spec matrix row 'Configuration' (audit E5): one explicit margin value
+    must reach `decode()` through every surface -- the evaluate CLI flag,
+    the streaming JSON config, the streaming runner, and the evaluate
+    decode path (recorder per ticket 03 P6)."""
+    import me2_voicegen.vcm.dataset as dataset_mod
+    import me2_voicegen.vcm.evaluate as evaluate_mod
+
+    from me2_voicegen.vcm.decoder import DecodeResult
+    from me2_voicegen.vcm.evaluate import build_arg_parser
+    from me2_voicegen.vcm.streaming.config import StreamingConfig
+    from me2_voicegen.vcm.streaming.policy import ThresholdPolicy
+    from me2_voicegen.vcm.streaming.runner import StreamingRunner
+
+    MARGIN = 0.5
+
+    # (1) evaluate CLI flag
+    args = build_arg_parser().parse_args(["--required-command-margin", str(MARGIN)])
+    assert args.required_command_margin == MARGIN
+
+    # (2) streaming JSON config
+    cfg_path = tmp_path / "streaming.json"
+    cfg_path.write_text(json.dumps({"required_command_margin": MARGIN}))
+    cfg = StreamingConfig.from_json(cfg_path)
+    assert cfg.required_command_margin == MARGIN
+
+    # (3) streaming runner surface: the config value reaches the stored
+    # runner field (ticket 03 P4 proves the stored field reaches `decode`
+    # on every window). Construction only -- source/backend are never
+    # touched by `__init__`.
+    runner = StreamingRunner(
+        source=object(),
+        backend=object(),
+        grammar=TOY_GRAMMAR,
+        policy=ThresholdPolicy(threshold=-0.1),
+        window_s=1.0,
+        stride_s=0.25,
+        refractory_s=0.0,
+        beam_width=25,
+        required_command_margin=cfg.required_command_margin,
+    )
+    assert runner.required_command_margin == MARGIN
+
+    # (4) evaluate surface: decode_split records the CLI-parsed value on
+    # every row it decodes.
+    manifest_path = _build_main_manifest(vcm_fake_manifest_factory)
+    val_dataset = dataset_mod.VCMDataset(manifest_path, split="val", augmenter=None)
+    seen: list = []
+
+    def _recorder(
+        model,
+        feature_extractor,
+        waveform,
+        grammar,
+        threshold,
+        beam_width=50,
+        device="cpu",
+        required_command_margin=None,
+    ):
+        seen.append(required_command_margin)
+        return DecodeResult(
+            None, {}, "", float("-inf"), True, float("inf")
+        )
+
+    monkeypatch.setattr(evaluate_mod, "infer_waveform", _recorder)
+    evaluate_mod.decode_split(
+        None,
+        None,
+        val_dataset,
+        TOY_GRAMMAR,
+        beam_width=50,
+        device="cpu",
+        required_command_margin=args.required_command_margin,
+    )
+    assert seen and all(m == MARGIN for m in seen)

@@ -161,6 +161,11 @@ class RowResult:
     ALARM clip) -- empty dict when `no_match` (per `vcm.decoder.decode`),
     never `None`, so callers can always safely do dict comparisons/lookups
     without a None-check."""
+    rejection_reason: str | None = None
+    """The decoder's `rejection_reason` (e.g. `"incomplete_prefix"` when the
+    required-command-margin gate rejected the row) -- `None` whenever the
+    gate was disabled or the row was not rejected by the gate, so the value
+    is JSON-safe either way."""
 
 
 @torch.no_grad()
@@ -171,13 +176,16 @@ def decode_split(
     grammar: Grammar,
     beam_width: int,
     device: str | torch.device,
+    required_command_margin: float | None = None,
 ) -> list[RowResult]:
     """Decode every row of `dataset` against `grammar` once, at the most
     permissive possible threshold (`-inf`) -- this captures each row's
     best-reachable intent/confidence independent of any operating
     threshold, so a threshold sweep afterwards is pure arithmetic over
     these cached results rather than re-running the model/decoder per
-    candidate threshold."""
+    candidate threshold. `required_command_margin`
+    (docs/INCOMPLETE-GRAMMAR-REJECTION.md, Step 3) is a decode-time
+    parameter threaded into every row independently (no cross-row state)."""
     results: list[RowResult] = []
     for i in range(len(dataset)):
         row = dataset.rows[i]
@@ -190,6 +198,7 @@ def decode_split(
             threshold=NEG_INF_THRESHOLD,
             beam_width=beam_width,
             device=device,
+            required_command_margin=required_command_margin,
         )
         confidence = None if decoded.intent is None else decoded.confidence
         results.append(
@@ -203,9 +212,23 @@ def decode_split(
                 group_id=row.get("group_id"),
                 source_dataset=row.get("source_dataset"),
                 slots=decoded.slots,
+                rejection_reason=decoded.rejection_reason,
             )
         )
     return results
+
+
+def _incomplete_prefix_rejection_counts(
+    val_results: list[RowResult], test_results: list[RowResult]
+) -> dict:
+    """Count rows rejected by the incomplete-prefix gate, per split
+    (docs/INCOMPLETE-GRAMMAR-REJECTION.md, Step 3). Pure over cached
+    `RowResult`s so it is unit-testable without a model; yields zero counts
+    whenever the gate was disabled (`rejection_reason` stays `None`)."""
+    return {
+        "val": sum(1 for r in val_results if r.rejection_reason == "incomplete_prefix"),
+        "test": sum(1 for r in test_results if r.rejection_reason == "incomplete_prefix"),
+    }
 
 
 def _accepted(r: RowResult, threshold: float) -> bool:
@@ -456,13 +479,20 @@ def evaluate_grammar(
     device: str | torch.device,
     threshold_grid: tuple[float, ...] = DEFAULT_THRESHOLD_GRID,
     intent_labels: list[str] | None = None,
+    required_command_margin: float | None = None,
 ) -> dict:
-    val_results = decode_split(model, feature_extractor, val_dataset, grammar, beam_width, device)
+    val_results = decode_split(
+        model, feature_extractor, val_dataset, grammar, beam_width, device,
+        required_command_margin=required_command_margin,
+    )
     sweep = sweep_thresholds(val_results, threshold_grid)
     chosen = choose_operating_threshold(sweep)
     threshold = chosen["threshold"]
 
-    test_results = decode_split(model, feature_extractor, test_dataset, grammar, beam_width, device)
+    test_results = decode_split(
+        model, feature_extractor, test_dataset, grammar, beam_width, device,
+        required_command_margin=required_command_margin,
+    )
     confusion = confusion_counts(test_results, threshold)
 
     target_rows = [r for r in test_results if r.bucket == TARGET_BUCKET]
@@ -478,6 +508,10 @@ def evaluate_grammar(
         "threshold_sweep_on_val": sweep,
         "chosen_operating_threshold": threshold,
         "chosen_operating_point_val_stats": chosen,
+        "required_command_margin": required_command_margin,
+        "incomplete_prefix_rejections": _incomplete_prefix_rejection_counts(
+            val_results, test_results
+        ),
         "test_split": {
             "n_target_commands": n_target,
             "n_accepted": n_accepted,
@@ -516,6 +550,7 @@ def evaluate_slot_eval_set(
     threshold: float,
     beam_width: int,
     device: str | torch.device,
+    required_command_margin: float | None = None,
 ) -> dict:
     """Runs Task 07's slot-eval-set clips (if present) through the same
     pipeline, at the already-chosen (`test`-split-reported) operating
@@ -540,7 +575,8 @@ def evaluate_slot_eval_set(
             waveform = torchaudio.functional.resample(waveform, sample_rate, int(row["sample_rate"]))
 
         decoded = infer_waveform(
-            model, feature_extractor, waveform, grammar, threshold=threshold, beam_width=beam_width, device=device
+            model, feature_extractor, waveform, grammar, threshold=threshold, beam_width=beam_width,
+            device=device, required_command_margin=required_command_margin,
         )
         per_row.append(
             {
@@ -672,6 +708,14 @@ def render_markdown(report: dict) -> str:
             f"{fab_rate_str} -- includes filipino_speech_corpus rows per decision (B)"
         )
         lines.append(f"- `silence` false-accept rate: {fas['false_accepts']}/{fas['n']} {fas_rate_str}")
+        # `.get`-based: old reports / partial section dicts without the key
+        # render exactly as before (no line).
+        rejections = section.get("incomplete_prefix_rejections")
+        if rejections is not None and section.get("required_command_margin") is not None:
+            lines.append(
+                f"- incomplete-prefix gate rejections: val={rejections['val']}, "
+                f"test={rejections['test']}"
+            )
         lines.append(
             "- These false-accept rates hold **at the chosen operating "
             "threshold only** -- see the val-split sweep table above for "
@@ -819,6 +863,16 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--device", default="cpu")
     parser.add_argument("--beam-width", type=int, default=50)
     parser.add_argument(
+        "--required-command-margin",
+        type=float,
+        default=None,
+        help=(
+            "incomplete-prefix rejection gate margin (raw unnormalized beam "
+            "log-mass units; docs/INCOMPLETE-GRAMMAR-REJECTION.md). Default "
+            "None = gate disabled"
+        ),
+    )
+    parser.add_argument(
         "--slot-eval-manifest",
         type=Path,
         default=DEFAULT_SLOT_EVAL_MANIFEST,
@@ -892,6 +946,7 @@ def main(argv: list[str] | None = None) -> None:
             args.device,
             threshold_grid,
             intent_labels,
+            args.required_command_margin,
         )
         grammar_sections.append(section)
         ts = section["test_split"]
@@ -921,6 +976,7 @@ def main(argv: list[str] | None = None) -> None:
                         section["chosen_operating_threshold"],
                         args.beam_width,
                         args.device,
+                        args.required_command_margin,
                     )
                 )
         except Exception as exc:  # noqa: BLE001 - optional section, must not hard-fail

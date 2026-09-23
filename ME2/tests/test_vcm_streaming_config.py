@@ -465,3 +465,37 @@ def test_resolve_policy_forwards_period_event_sink_to_mode_period_only():
     assert resolve_policy("mode_period", -0.1, gate=_StandinGate())._on_period_event is None
     threshold_policy = resolve_policy("threshold", -0.1)
     assert not hasattr(threshold_policy, "_on_period_event")
+
+
+# ---------------------------------------------------------------------------
+# required_command_margin (incomplete-prefix rejection gate; ticket 03 of
+# .scratch/incomplete-grammar-rejection/tickets, docs/
+# INCOMPLETE-GRAMMAR-REJECTION.md Step 3). Same validation rules as the
+# existing nullable float `threshold` field: null allowed, int coerced to
+# float, strings/bools rejected.
+# ---------------------------------------------------------------------------
+
+
+def test_streaming_config_required_command_margin_defaults_none():
+    config = StreamingConfig()
+    assert config.required_command_margin is None
+
+
+@pytest.mark.parametrize(
+    ("json_value", "expected"),
+    [(None, None), (0, 0.0), (-0.5, -0.5), (1.5, 1.5)],
+)
+def test_from_json_accepts_nullable_required_command_margin(tmp_path, json_value, expected):
+    config_path = tmp_path / "config.json"
+    config_path.write_text(json.dumps({"required_command_margin": json_value}))
+    config = StreamingConfig.from_json(config_path)
+    assert config.required_command_margin == expected
+
+
+@pytest.mark.parametrize("json_value", [True, "0.5"])
+def test_from_json_rejects_bad_required_command_margin(tmp_path, json_value):
+    config_path = tmp_path / "config.json"
+    config_path.write_text(json.dumps({"required_command_margin": json_value}))
+    with pytest.raises(SystemExit) as excinfo:
+        StreamingConfig.from_json(config_path)
+    assert "required_command_margin" in str(excinfo.value)
