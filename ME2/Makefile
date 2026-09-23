@@ -37,10 +37,15 @@ STREAM_BACKEND ?= onnx
 STREAM_SOURCE ?= mic
 STREAM_ARGS ?=
 
-.PHONY: sync vendor download-model generate generate-personas generate-conversions test clean vcm-train vcm-bench vcm-eval optionb-train optionb-eval stream wakeword-fetch-positives wakeword-fetch-positives-dry-run
+.PHONY: sync vendor download-model generate generate-personas generate-conversions test clean vcm-train vcm-bench vcm-eval optionb-train optionb-eval stream wakeword-fetch-positives wakeword-fetch-positives-dry-run wakeword-convert-positives wakeword-convert-positives-dry-run
 
 WAKEWORD_CLONE_DIR ?= $(if $(TMPDIR),$(TMPDIR),/tmp)/me2_wakeword_clone
 WAKEWORD_POSITIVES_OUT_DIR ?= out/conversions/v2/wakeword/positives_real
+WAKEWORD_CONVERTED_OUT_DIR ?= out/conversions/v2/wakeword/positives_converted
+WAKEWORD_REFS_DIR ?= $(REFS_DIR)
+WAKEWORD_K ?= 8
+WAKEWORD_SEED ?= 0
+WAKEWORD_MAX_CONVERSIONS ?=
 
 sync:
 	$(UV) sync
@@ -122,6 +127,20 @@ wakeword-fetch-positives-dry-run:
 	@test -n "$(strip $(WAKEWORD_CLONE_DIR))" || { echo "WAKEWORD_CLONE_DIR must not be empty" >&2; exit 1; }
 	@test -n "$(strip $(WAKEWORD_POSITIVES_OUT_DIR))" || { echo "WAKEWORD_POSITIVES_OUT_DIR must not be empty" >&2; exit 1; }
 	$(UV) run python -m me2_voicegen.wakeword.fetch_positives --clone-dir "$(WAKEWORD_CLONE_DIR)" --out-root "$(WAKEWORD_POSITIVES_OUT_DIR)" --dry-run
+
+# Ticket 03: K=8 stratified voice-conversion of ticket 01's real positives.
+# --seed is required by convert_positives.py itself (fails loudly if
+# unset); WAKEWORD_SEED's own default here just keeps `make` runnable
+# out of the box, same posture as VCM_SEED above. WAKEWORD_MAX_CONVERSIONS
+# is empty by default (no cap, full run); set it to pilot/chunk real work,
+# e.g. `make wakeword-convert-positives WAKEWORD_MAX_CONVERSIONS=20`.
+wakeword-convert-positives:
+	@test -n "$(strip $(WAKEWORD_CONVERTED_OUT_DIR))" || { echo "WAKEWORD_CONVERTED_OUT_DIR must not be empty" >&2; exit 1; }
+	$(UV) run python -m me2_voicegen.wakeword.convert_positives --positives-manifest "$(WAKEWORD_POSITIVES_OUT_DIR)/manifest.csv" --refs-dir "$(WAKEWORD_REFS_DIR)" --out-root "$(WAKEWORD_CONVERTED_OUT_DIR)" --k $(WAKEWORD_K) --seed $(WAKEWORD_SEED) $(if $(WAKEWORD_MAX_CONVERSIONS),--max-conversions $(WAKEWORD_MAX_CONVERSIONS))
+
+wakeword-convert-positives-dry-run:
+	@test -n "$(strip $(WAKEWORD_CONVERTED_OUT_DIR))" || { echo "WAKEWORD_CONVERTED_OUT_DIR must not be empty" >&2; exit 1; }
+	$(UV) run python -m me2_voicegen.wakeword.convert_positives --positives-manifest "$(WAKEWORD_POSITIVES_OUT_DIR)/manifest.csv" --refs-dir "$(WAKEWORD_REFS_DIR)" --out-root "$(WAKEWORD_CONVERTED_OUT_DIR)" --k $(WAKEWORD_K) --seed $(WAKEWORD_SEED) --dry-run
 
 test:
 	$(UV) run pytest
