@@ -37,7 +37,7 @@ STREAM_BACKEND ?= onnx
 STREAM_SOURCE ?= mic
 STREAM_ARGS ?=
 
-.PHONY: sync vendor download-model generate generate-personas generate-conversions test clean vcm-train vcm-bench vcm-eval optionb-train optionb-eval stream wakeword-fetch-positives wakeword-fetch-positives-dry-run wakeword-convert-positives wakeword-convert-positives-dry-run wakeword-generate-silence wakeword-generate-silence-dry-run wakeword-generate-adversaries wakeword-generate-adversaries-dry-run
+.PHONY: sync vendor download-model generate generate-personas generate-conversions test clean vcm-train vcm-bench vcm-eval optionb-train optionb-eval stream wakeword-fetch-positives wakeword-fetch-positives-dry-run wakeword-convert-positives wakeword-convert-positives-dry-run wakeword-generate-silence wakeword-generate-silence-dry-run wakeword-generate-adversaries wakeword-generate-adversaries-dry-run wakeword-mix-noise wakeword-mix-noise-dry-run
 
 WAKEWORD_CLONE_DIR ?= $(if $(TMPDIR),$(TMPDIR),/tmp)/me2_wakeword_clone
 WAKEWORD_POSITIVES_OUT_DIR ?= out/conversions/v2/wakeword/positives_real
@@ -51,6 +51,10 @@ WAKEWORD_SILENCE_SEED ?= 0
 WAKEWORD_SILENCE_TOTAL_COUNT ?= 1806
 WAKEWORD_ADVERSARIES_REFS_DIR ?= $(REFS_DIR)
 WAKEWORD_ADVERSARIES_OUT_DIR ?= out/conversions/v2/wakeword/adversaries
+WAKEWORD_ROOT ?= out/conversions/v2/wakeword
+WAKEWORD_NOISE_ROOT ?= out/conversions/v2/background_noise
+WAKEWORD_NOISE_PROB ?= 0.35
+WAKEWORD_NOISE_SEED ?= 0
 
 sync:
 	$(UV) sync
@@ -166,6 +170,17 @@ wakeword-generate-adversaries:
 
 wakeword-generate-adversaries-dry-run:
 	$(UV) run python -m me2_voicegen.wakeword.generate_adversaries --refs-dir "$(WAKEWORD_ADVERSARIES_REFS_DIR)" --out-root "$(WAKEWORD_ADVERSARIES_OUT_DIR)" --backend $(BACKEND) --dry-run
+
+# `mix_background_noise.py` -- probabilistically mixes background_noise
+# (ESC-50, CC-BY-NC-SA-4.0) into adversaries/positives_converted, additively,
+# writing new `*_noisy` sibling subsets (originals untouched). This is a
+# deliberate, documented licensing-encumbrance decision -- see
+# docs/WAKEWORD-DATASET-CONTRACT.md section 7 before running it.
+wakeword-mix-noise:
+	$(UV) run python -m me2_voicegen.wakeword.mix_background_noise --wakeword-root "$(WAKEWORD_ROOT)" --noise-root "$(WAKEWORD_NOISE_ROOT)" --noise-prob $(WAKEWORD_NOISE_PROB) --seed $(WAKEWORD_NOISE_SEED)
+
+wakeword-mix-noise-dry-run:
+	$(UV) run python -m me2_voicegen.wakeword.mix_background_noise --wakeword-root "$(WAKEWORD_ROOT)" --noise-root "$(WAKEWORD_NOISE_ROOT)" --noise-prob $(WAKEWORD_NOISE_PROB) --seed $(WAKEWORD_NOISE_SEED) --dry-run
 
 test:
 	$(UV) run pytest
