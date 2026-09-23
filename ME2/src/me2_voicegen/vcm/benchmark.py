@@ -11,6 +11,18 @@ context, never as a pass/fail claim about real RPi behavior.
 `onnxruntime` is pinned to 1 intra-op thread and 1 inter-op thread for the
 latency benchmark, per this task's ticket, so the number reflects
 single-core throughput rather than this node's 256-way parallelism.
+
+`--model-family {vcm,wakeword}` (feature `wakeword-dscnn`,
+feature-engineering/wakeword-dscnn/SPEC.md): `benchmark_session`/
+`_make_session`/`_render_markdown`/RSS-latency measurement are reused
+unchanged -- they only ever touch an onnxruntime session + a frame count,
+never a model class. `NOT_MEASURED_ON` already read "Raspberry Pi 4/5 (no
+such hardware exists on this node)" before this feature existed, which
+happens to already name wakeword's real target device (RPi 4, 2018, 4GB
+RAM, confirmed by the user) -- unchanged; the wakeword result additionally
+records that confirmed target under its own `target_device` key so the
+distinction between "the label this module always used" and "the actual
+confirmed target for this specific model" is explicit, not implied.
 """
 
 from __future__ import annotations
@@ -24,18 +36,21 @@ from pathlib import Path
 
 from me2_voicegen.vcm.export_onnx import (
     DEFAULT_MANIFEST,
+    SAMPLE_RATE,
     WINDOW_SECONDS,
     ValSplitCalibrationReader,
+    WakewordCalibrationReader,
     dummy_features,
     export_fp32,
     load_checkpoint,
     quantize_int8_static,
     window_n_frames,
 )
-from me2_voicegen.vcm.model import estimated_int8_bytes
+from me2_voicegen.vcm.model import estimated_int8_bytes as vcm_estimated_int8_bytes
 
 HARDWARE_LABEL = "AMD EPYC 7742 (256-thread node) estimate"
 NOT_MEASURED_ON = "Raspberry Pi 4/5 (no such hardware exists on this node)"
+WAKEWORD_TARGET_DEVICE = "Raspberry Pi 4 (2018), 4GB RAM (Broadcom BCM2711, quad-core Cortex-A72) -- confirmed target, not yet measured on this node"
 
 SPEC_BUDGETS_INDICATIVE_ONLY = {
     "latency_ms_per_100ms_frame_le": 20.0,
@@ -110,9 +125,10 @@ def benchmark_session(session, n_frames: int, n_warmup: int = 10, n_iters: int =
 
 def build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--checkpoint", type=Path, default=Path("out/vcm/checkpoints/checkpoint.pt"))
-    parser.add_argument("--out-dir", type=Path, default=Path("out/vcm"))
-    parser.add_argument("--manifest", type=Path, default=DEFAULT_MANIFEST)
+    parser.add_argument("--model-family", choices=["vcm", "wakeword"], default="vcm")
+    parser.add_argument("--checkpoint", type=Path, default=None, help="default: out/<family>/checkpoints/checkpoint.pt")
+    parser.add_argument("--out-dir", type=Path, default=None, help="default: out/<family>")
+    parser.add_argument("--manifest", type=Path, default=None, help="default: that family's own DEFAULT_MANIFEST")
     parser.add_argument("--calibration-samples", type=int, default=32)
     parser.add_argument("--n-warmup", type=int, default=10)
     parser.add_argument("--n-iters", type=int, default=100)
@@ -128,19 +144,60 @@ def build_arg_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _resolve_family_defaults(args: argparse.Namespace) -> None:
+    """Mirrors `export_onnx._resolve_family_defaults` -- `model_family="vcm"`
+    (the default) resolves to exactly today's static defaults."""
+    if args.model_family == "wakeword":
+        if args.checkpoint is None:
+            args.checkpoint = Path("out/wakeword/checkpoints/checkpoint.pt")
+        if args.out_dir is None:
+            args.out_dir = Path("out/wakeword")
+        if args.manifest is None:
+            from me2_voicegen.wakeword.train import DEFAULT_MANIFEST as WAKEWORD_DEFAULT_MANIFEST
+
+            args.manifest = WAKEWORD_DEFAULT_MANIFEST
+    else:
+        if args.checkpoint is None:
+            args.checkpoint = Path("out/vcm/checkpoints/checkpoint.pt")
+        if args.out_dir is None:
+            args.out_dir = Path("out/vcm")
+        if args.manifest is None:
+            args.manifest = DEFAULT_MANIFEST
+
+
 def main(argv: list[str] | None = None) -> None:
     args = build_arg_parser().parse_args(argv)
+    _resolve_family_defaults(args)
     args.out_dir.mkdir(parents=True, exist_ok=True)
     export_dir = args.out_dir / "export"
     metadata_dir = args.out_dir / "metadata"
     export_dir.mkdir(parents=True, exist_ok=True)
     metadata_dir.mkdir(parents=True, exist_ok=True)
 
-    model, ckpt = load_checkpoint(args.checkpoint)
-    n_frames = window_n_frames()
+    model, ckpt = load_checkpoint(args.checkpoint, model_family=args.model_family)
 
-    fp32_path = export_dir / "vcm_model.fp32.onnx"
-    export_fp32(model, fp32_path, n_frames=n_frames)
+    if args.model_family == "wakeword":
+        from me2_voicegen.wakeword.dataset import WAKEWORD_WINDOW_SECONDS
+        from me2_voicegen.wakeword.model import estimated_int8_bytes as wakeword_estimated_int8_bytes
+
+        window_seconds = WAKEWORD_WINDOW_SECONDS
+        n_frames = window_n_frames(int(window_seconds * SAMPLE_RATE))
+        model_prefix = "wakeword_model"
+        export_kwargs: dict = {"output_names": ["logits"], "dynamic_axes": {"features": {0: "batch"}}}
+        reader = WakewordCalibrationReader(manifest_path=args.manifest, n_samples=args.calibration_samples)
+        estimate_fn = wakeword_estimated_int8_bytes
+        extra_result_fields = {"target_device": WAKEWORD_TARGET_DEVICE}
+    else:
+        window_seconds = WINDOW_SECONDS
+        n_frames = window_n_frames()
+        model_prefix = "vcm_model"
+        export_kwargs = {}
+        reader = ValSplitCalibrationReader(manifest_path=args.manifest, n_samples=args.calibration_samples)
+        estimate_fn = vcm_estimated_int8_bytes
+        extra_result_fields = {}
+
+    fp32_path = export_dir / f"{model_prefix}.fp32.onnx"
+    export_fp32(model, fp32_path, n_frames=n_frames, **export_kwargs)
     fp32_size_bytes = fp32_path.stat().st_size
 
     fp32_session = _make_session(fp32_path)
@@ -149,7 +206,7 @@ def main(argv: list[str] | None = None) -> None:
     result: dict = {
         "hardware_label": HARDWARE_LABEL,
         "not_measured_on": NOT_MEASURED_ON,
-        "window_seconds": WINDOW_SECONDS,
+        "window_seconds": window_seconds,
         "n_frames": n_frames,
         "onnxruntime_threads": {"intra_op": 1, "inter_op": 1},
         "checkpoint": str(args.checkpoint),
@@ -160,26 +217,23 @@ def main(argv: list[str] | None = None) -> None:
             **fp32_bench,
         },
         "spec_budgets_indicative_only": SPEC_BUDGETS_INDICATIVE_ONLY,
+        **extra_result_fields,
     }
 
     if args.skip_quantization:
-        est_bytes = estimated_int8_bytes(model)
+        est_bytes = estimate_fn(model)
         result["int8"] = {
             "measured": False,
             "estimate_basis": (
-                "param_count * 1 byte/param + 4 bytes/tensor scale "
-                "(vcm.model.estimated_int8_bytes) -- SIZE ESTIMATE ONLY, "
-                "not a measured quantized artifact; no latency estimate "
-                "is reported for this fallback path."
+                "param_count * 1 byte/param + 4 bytes/tensor scale -- SIZE "
+                "ESTIMATE ONLY, not a measured quantized artifact; no "
+                "latency estimate is reported for this fallback path."
             ),
             "estimated_size_bytes": est_bytes,
             "estimated_size_mb": est_bytes / (1024 * 1024),
         }
     else:
-        int8_path = export_dir / "vcm_model.int8.onnx"
-        reader = ValSplitCalibrationReader(
-            manifest_path=args.manifest, n_samples=args.calibration_samples
-        )
+        int8_path = export_dir / f"{model_prefix}.int8.onnx"
         quantize_int8_static(fp32_path, int8_path, reader)
         int8_size_bytes = int8_path.stat().st_size
 
@@ -193,11 +247,11 @@ def main(argv: list[str] | None = None) -> None:
             **int8_bench,
         }
 
-    json_path = metadata_dir / "vcm_benchmark.json"
+    json_path = metadata_dir / f"{model_prefix.replace('_model', '')}_benchmark.json"
     with json_path.open("w") as f:
         json.dump(result, f, indent=2)
 
-    md_path = metadata_dir / "vcm_benchmark.md"
+    md_path = metadata_dir / f"{model_prefix.replace('_model', '')}_benchmark.md"
     md_path.write_text(_render_markdown(result))
 
     print(f"wrote {json_path}")
@@ -206,8 +260,9 @@ def main(argv: list[str] | None = None) -> None:
 
 
 def _render_markdown(result: dict) -> str:
+    title = "Wakeword DS-CNN" if result.get("target_device") else "VCM"
     lines = [
-        "# VCM ONNX export/quantization benchmark",
+        f"# {title} ONNX export/quantization benchmark",
         "",
         f"**Hardware: {result['hardware_label']}. NOT a {result['not_measured_on']} measurement.**",
         "",
@@ -215,6 +270,10 @@ def _render_markdown(result: dict) -> str:
         f"onnxruntime threads: intra_op={result['onnxruntime_threads']['intra_op']}, "
         f"inter_op={result['onnxruntime_threads']['inter_op']}. "
         f"Checkpoint: `{result['checkpoint']}` (preset={result['preset']}).",
+    ]
+    if result.get("target_device"):
+        lines.append(f"**Confirmed target device: {result['target_device']}.**")
+    lines += [
         "",
         "| variant | size (MB) | p50 latency (ms) | p95 latency (ms) | process peak RSS (MB) | inference-only RSS delta (KB) | note |",
         "|---|---|---|---|---|---|---|",

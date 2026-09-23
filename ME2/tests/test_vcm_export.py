@@ -27,11 +27,18 @@ import torch
 from me2_voicegen.vcm.benchmark import (
     HARDWARE_LABEL,
     NOT_MEASURED_ON,
+    WAKEWORD_TARGET_DEVICE,
     _render_markdown,
+    _resolve_family_defaults as _benchmark_resolve_family_defaults,
+    build_arg_parser as build_benchmark_arg_parser,
 )
 from me2_voicegen.vcm.export_onnx import (
+    DEFAULT_MANIFEST,
     ValSplitCalibrationReader,
     WINDOW_SAMPLES,
+    WakewordCalibrationReader,
+    _resolve_family_defaults as _export_resolve_family_defaults,
+    build_arg_parser as build_export_arg_parser,
     dummy_features,
     export_fp32,
     load_checkpoint,
@@ -40,8 +47,10 @@ from me2_voicegen.vcm.export_onnx import (
     window_n_frames,
 )
 from me2_voicegen.vcm.model import MatchboxNetConfig, MatchboxNetCTC
+from me2_voicegen.wakeword.model import DSCNN, DSCNNConfig
 
 REAL_CHECKPOINT = Path("out/vcm/checkpoints/checkpoint.pt")
+REAL_WAKEWORD_CHECKPOINT = Path("out/wakeword/checkpoints/checkpoint.pt")
 
 
 def _target_command_specs(n: int = 40) -> list[dict]:
@@ -117,6 +126,127 @@ def test_calibration_reader_pads_short_waveforms(vcm_fake_manifest_factory):
     reader = ValSplitCalibrationReader(manifest_path=manifest_path, n_samples=2, seed=0)
     batch = reader.get_next()
     assert batch["features"].shape == (1, 40, window_n_frames())
+
+
+# ---------------------------------------------------------------------------
+# Wakeword family (feature `wakeword-dscnn`, feature-engineering/
+# wakeword-dscnn/SPEC.md): vcm.export_onnx/vcm.benchmark are extended with
+# --model-family rather than duplicated. Fast cases below prove the vcm
+# default path is unchanged and the wakeword plumbing works, without
+# touching onnx/onnxruntime (same fast-suite discipline as the vcm tests
+# above); slow cases below the existing slow section do real export/
+# quantization for wakeword the same way the vcm slow tests do.
+# ---------------------------------------------------------------------------
+
+
+def _wakeword_manifest(tmp_path, vcm_wav_factory, n_each: int = 3) -> Path:
+    import csv
+
+    fields = [
+        "filename", "path", "label", "duration", "sample_rate", "resampled",
+        "source_dataset", "source_relpath", "group_id", "split",
+        "speech_start_s", "speech_end_s",
+    ]
+    root = tmp_path / "wakeword"
+    rows = []
+    labels = [("_wakeword_", "positives_real"), ("_unknown_", "adversaries"), ("_silence_", "silence_synthetic")]
+    for label, subset in labels:
+        for i in range(n_each):
+            filename = f"{subset}_{i}.wav"
+            rel = f"{subset}/audio/{filename}"
+            vcm_wav_factory(root / rel, duration_s=1.5, silence=(label == "_silence_"))
+            rows.append(
+                {
+                    "filename": filename,
+                    "path": rel,
+                    "label": label,
+                    "duration": "1.500000",
+                    "sample_rate": "16000",
+                    "resampled": "False",
+                    "source_dataset": subset,
+                    "source_relpath": filename,
+                    "group_id": filename,
+                    "split": "val",
+                    "speech_start_s": "0.200000" if label != "_silence_" else "",
+                    "speech_end_s": "1.300000" if label != "_silence_" else "",
+                }
+            )
+    manifest_path = root / "manifest.csv"
+    with manifest_path.open("w", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(f, fieldnames=fields)
+        writer.writeheader()
+        writer.writerows(rows)
+    return manifest_path
+
+
+def test_load_checkpoint_unknown_family_raises(tmp_path):
+    ckpt_path = tmp_path / "fake.pt"
+    torch.save({"config": {}, "model_state_dict": {}}, ckpt_path)
+    import pytest
+
+    with pytest.raises(ValueError, match="unknown model_family"):
+        load_checkpoint(ckpt_path, model_family="bogus")
+
+
+def test_export_resolve_family_defaults_leaves_vcm_defaults_unchanged():
+    args = build_export_arg_parser().parse_args([])
+    assert args.model_family == "vcm"
+    _export_resolve_family_defaults(args)
+    assert args.checkpoint == Path("out/vcm/checkpoints/checkpoint.pt")
+    assert args.out_dir == Path("out/vcm")
+    assert args.manifest == DEFAULT_MANIFEST
+
+
+def test_export_resolve_family_defaults_resolves_wakeword_paths():
+    args = build_export_arg_parser().parse_args(["--model-family", "wakeword"])
+    _export_resolve_family_defaults(args)
+    assert args.checkpoint == Path("out/wakeword/checkpoints/checkpoint.pt")
+    assert args.out_dir == Path("out/wakeword")
+    assert "wakeword" in str(args.manifest)
+
+
+def test_export_resolve_family_defaults_respects_explicit_overrides():
+    args = build_export_arg_parser().parse_args(
+        ["--model-family", "wakeword", "--checkpoint", "custom.pt", "--out-dir", "custom_dir"]
+    )
+    _export_resolve_family_defaults(args)
+    assert args.checkpoint == Path("custom.pt")
+    assert args.out_dir == Path("custom_dir")
+
+
+def test_benchmark_resolve_family_defaults_wakeword():
+    args = build_benchmark_arg_parser().parse_args(["--model-family", "wakeword"])
+    _benchmark_resolve_family_defaults(args)
+    assert args.checkpoint == Path("out/wakeword/checkpoints/checkpoint.pt")
+    assert args.out_dir == Path("out/wakeword")
+
+
+def test_wakeword_target_device_names_rpi4_not_rpi5():
+    assert "Raspberry Pi 4" in WAKEWORD_TARGET_DEVICE
+    assert "4GB" in WAKEWORD_TARGET_DEVICE
+
+
+def test_wakeword_calibration_reader_yields_log_mel_shaped_batches(tmp_path, vcm_wav_factory):
+    manifest_path = _wakeword_manifest(tmp_path, vcm_wav_factory, n_each=4)
+    reader = WakewordCalibrationReader(manifest_path=manifest_path, n_samples=5, seed=0)
+
+    batches = []
+    while True:
+        batch = reader.get_next()
+        if batch is None:
+            break
+        batches.append(batch)
+
+    assert len(batches) == 5
+    for batch in batches:
+        assert set(batch.keys()) == {"features"}
+        arr = batch["features"]
+        assert isinstance(arr, np.ndarray)
+        assert arr.dtype == np.float32
+        assert arr.shape[0] == 1 and arr.shape[1] == 40
+
+    reader.rewind()
+    assert reader.get_next() is not None
 
 
 def test_render_markdown_labels_hardware_and_not_rpi_for_measured_int8():
@@ -267,3 +397,108 @@ def test_static_int8_quantization_shrinks_model_and_quantizes_conv(vcm_fake_mani
         op_types = {node.op_type for node in quantized_graph.graph.node}
         assert "QuantizeLinear" in op_types and "DequantizeLinear" in op_types
         assert "Conv" in op_types  # Conv is present *and* fed by DequantizeLinear (int8 weights), not left fully fp32
+
+
+# ---------------------------------------------------------------------------
+# Wakeword family, slow: real torch.onnx.export + real onnxruntime, same
+# discipline as the vcm slow tests above.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.slow
+def test_onnx_export_logits_match_pytorch_within_tolerance_wakeword_synthetic_model():
+    """Untrained-model export-correctness check, mirroring the vcm synthetic
+    test above -- proves the wakeword export graph (static (B,3) output, no
+    dynamic time axis) is numerically faithful independent of whether a
+    trained checkpoint exists on this machine."""
+    torch.manual_seed(0)
+    config = DSCNNConfig(n_blocks=2, channels=16, kernel_sizes=[5, 5], prologue_channels=12)
+    model = DSCNN(config)
+    model.eval()
+
+    import tempfile
+
+    with tempfile.TemporaryDirectory() as tmp:
+        onnx_path = Path(tmp) / "wakeword_model.onnx"
+        from me2_voicegen.wakeword.dataset import WAKEWORD_WINDOW_SECONDS
+
+        n_frames = window_n_frames(int(WAKEWORD_WINDOW_SECONDS * 16000))
+        export_fp32(
+            model,
+            onnx_path,
+            n_frames=n_frames,
+            output_names=["logits"],
+            dynamic_axes={"features": {0: "batch"}},
+        )
+        assert onnx_path.exists()
+
+        torch_logits, onnx_logits = onnx_vs_pytorch_logits(model, onnx_path, n_frames=n_frames)
+        assert torch_logits.shape == onnx_logits.shape == (1, 3)
+        max_abs_diff = np.abs(torch_logits - onnx_logits).max()
+        assert max_abs_diff < 1e-3, max_abs_diff
+
+
+@pytest.mark.slow
+def test_static_int8_quantization_wakeword_family_shrinks_model_and_quantizes_conv(tmp_path, vcm_wav_factory):
+    torch.manual_seed(0)
+    config = DSCNNConfig(n_blocks=2, channels=16, kernel_sizes=[5, 5], prologue_channels=12)
+    model = DSCNN(config)
+    model.eval()
+
+    manifest_path = _wakeword_manifest(tmp_path, vcm_wav_factory, n_each=6)
+
+    import tempfile
+
+    import onnx as onnx_pkg
+
+    with tempfile.TemporaryDirectory() as tmp:
+        fp32_path = Path(tmp) / "wakeword_model.fp32.onnx"
+        int8_path = Path(tmp) / "wakeword_model.int8.onnx"
+        from me2_voicegen.wakeword.dataset import WAKEWORD_WINDOW_SECONDS
+
+        n_frames = window_n_frames(int(WAKEWORD_WINDOW_SECONDS * 16000))
+        export_fp32(
+            model,
+            fp32_path,
+            n_frames=n_frames,
+            output_names=["logits"],
+            dynamic_axes={"features": {0: "batch"}},
+        )
+
+        reader = WakewordCalibrationReader(manifest_path=manifest_path, n_samples=8, seed=0)
+        quantize_int8_static(fp32_path, int8_path, reader)
+
+        assert int8_path.exists()
+        assert int8_path.stat().st_size < fp32_path.stat().st_size
+
+        quantized_graph = onnx_pkg.load(str(int8_path))
+        op_types = {node.op_type for node in quantized_graph.graph.node}
+        assert "QuantizeLinear" in op_types and "DequantizeLinear" in op_types
+        assert "Conv" in op_types
+
+
+@pytest.mark.slow
+@pytest.mark.skipif(
+    not REAL_WAKEWORD_CHECKPOINT.exists(), reason="no trained checkpoint at out/wakeword/checkpoints/checkpoint.pt"
+)
+def test_onnx_export_logits_match_pytorch_on_real_wakeword_checkpoint():
+    model, _ckpt = load_checkpoint(REAL_WAKEWORD_CHECKPOINT, model_family="wakeword")
+
+    import tempfile
+
+    with tempfile.TemporaryDirectory() as tmp:
+        onnx_path = Path(tmp) / "wakeword_model.onnx"
+        from me2_voicegen.wakeword.dataset import WAKEWORD_WINDOW_SECONDS
+
+        n_frames = window_n_frames(int(WAKEWORD_WINDOW_SECONDS * 16000))
+        export_fp32(
+            model,
+            onnx_path,
+            n_frames=n_frames,
+            output_names=["logits"],
+            dynamic_axes={"features": {0: "batch"}},
+        )
+
+        torch_logits, onnx_logits = onnx_vs_pytorch_logits(model, onnx_path, n_frames=n_frames)
+        max_abs_diff = np.abs(torch_logits - onnx_logits).max()
+        assert max_abs_diff < 1e-3, max_abs_diff

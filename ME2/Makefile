@@ -37,7 +37,7 @@ STREAM_BACKEND ?= onnx
 STREAM_SOURCE ?= mic
 STREAM_ARGS ?=
 
-.PHONY: sync vendor download-model generate generate-personas generate-conversions test clean vcm-train vcm-bench vcm-eval optionb-train optionb-eval stream wakeword-fetch-positives wakeword-fetch-positives-dry-run wakeword-convert-positives wakeword-convert-positives-dry-run wakeword-generate-silence wakeword-generate-silence-dry-run wakeword-generate-adversaries wakeword-generate-adversaries-dry-run wakeword-mix-noise wakeword-mix-noise-dry-run wakeword-consolidate-manifest wakeword-build-unknown-external wakeword-build-unknown-external-dry-run wakeword-build-dataset wakeword-derive-spans wakeword-train
+.PHONY: sync vendor download-model generate generate-personas generate-conversions test clean vcm-train vcm-bench vcm-eval optionb-train optionb-eval stream wakeword-fetch-positives wakeword-fetch-positives-dry-run wakeword-convert-positives wakeword-convert-positives-dry-run wakeword-generate-silence wakeword-generate-silence-dry-run wakeword-generate-adversaries wakeword-generate-adversaries-dry-run wakeword-mix-noise wakeword-mix-noise-dry-run wakeword-consolidate-manifest wakeword-build-unknown-external wakeword-build-unknown-external-dry-run wakeword-build-dataset wakeword-derive-spans wakeword-train wakeword-export wakeword-bench
 
 WAKEWORD_CLONE_DIR ?= $(if $(TMPDIR),$(TMPDIR),/tmp)/me2_wakeword_clone
 WAKEWORD_POSITIVES_OUT_DIR ?= out/conversions/v2/wakeword/positives_real
@@ -68,6 +68,9 @@ WAKEWORD_DEVICE ?= cpu
 WAKEWORD_MAX_MINUTES ?= 30
 WAKEWORD_TRAIN_SEED ?= 0
 WAKEWORD_NOISE_ROOT_TRAIN ?= out/conversions/v2/background_noise
+WAKEWORD_CHECKPOINT ?= $(WAKEWORD_TRAIN_OUT_DIR)/checkpoints/checkpoint.pt
+WAKEWORD_BENCH_CALIBRATION_SAMPLES ?= 32
+WAKEWORD_BENCH_N_ITERS ?= 100
 
 sync:
 	$(UV) sync
@@ -234,6 +237,16 @@ wakeword-derive-spans:
 
 wakeword-train:
 	$(UV) run python -m me2_voicegen.wakeword.train --manifest "$(WAKEWORD_TRAIN_MANIFEST)" --out-dir "$(WAKEWORD_TRAIN_OUT_DIR)" --preset $(WAKEWORD_PRESET) --device $(WAKEWORD_DEVICE) --max-minutes $(WAKEWORD_MAX_MINUTES) --seed $(WAKEWORD_TRAIN_SEED) --noise-root "$(WAKEWORD_NOISE_ROOT_TRAIN)"
+
+# export_onnx.py/benchmark.py are vcm/'s own modules, extended with
+# --model-family wakeword rather than duplicated (SPEC.md's explicit
+# deferral decision) -- these targets are the wakeword-pointed invocation
+# of the same CLIs vcm-bench/vcm.export_onnx already use.
+wakeword-export:
+	$(UV) run python -m me2_voicegen.vcm.export_onnx --model-family wakeword --checkpoint "$(WAKEWORD_CHECKPOINT)" --out-dir "$(WAKEWORD_TRAIN_OUT_DIR)" --manifest "$(WAKEWORD_TRAIN_MANIFEST)" --calibration-samples $(WAKEWORD_BENCH_CALIBRATION_SAMPLES)
+
+wakeword-bench:
+	$(UV) run python -m me2_voicegen.vcm.benchmark --model-family wakeword --checkpoint "$(WAKEWORD_CHECKPOINT)" --out-dir "$(WAKEWORD_TRAIN_OUT_DIR)" --manifest "$(WAKEWORD_TRAIN_MANIFEST)" --calibration-samples $(WAKEWORD_BENCH_CALIBRATION_SAMPLES) --n-iters $(WAKEWORD_BENCH_N_ITERS)
 
 test:
 	$(UV) run pytest
