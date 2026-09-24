@@ -131,6 +131,14 @@ stream:
 stream-single-period:
 	$(MAKE) stream STREAM_ARGS="--policy single_period --gate spacebar --gate-period 3 --threshold -0.132222 --log-periods"
 
+# Feature `wakeword-gate` (feature-engineering/wakeword-gate/SPEC.md): the
+# trained wakeword DS-CNN in place of the spacebar press. Requires
+# `make wakeword-export` to have been run first for --wakeword-backend onnx
+# (the default here); pass STREAM_ARGS="--wakeword-backend torch ..." to use
+# the checkpoint directly instead.
+stream-wakeword:
+	$(MAKE) stream STREAM_ARGS="--policy single_period --gate wakeword --gate-period 3 --threshold -0.132222 --wakeword-backend onnx --log-periods"
+
 # Wakeword ("computer"-only) dataset-build targets. See
 # docs/WAKEWORD-DATASET-CONTRACT.md for the manifest schema/output layout
 # `fetch_positives.py` (ticket 01) produces; later tickets (02/03/04/05)

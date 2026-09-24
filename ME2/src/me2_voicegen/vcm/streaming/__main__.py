@@ -27,6 +27,7 @@ from me2_voicegen.vcm.streaming.config import (
     resolve_model,
     resolve_policy,
     resolve_threshold,
+    resolve_wakeword_model,
 )
 from me2_voicegen.vcm.streaming.gate import (
     GateState,
@@ -41,6 +42,11 @@ from me2_voicegen.vcm.streaming.sources import (
     MicrophoneUnavailableError,
     WavFileSource,
     open_microphone_source,
+)
+from me2_voicegen.vcm.streaming.wakeword_gate import (
+    WakewordInferenceBackend,
+    WakewordOnnxBackend,
+    WakewordTorchBackend,
 )
 
 LICENSE_NOTE = (
@@ -114,8 +120,37 @@ def build_arg_parser() -> argparse.ArgumentParser:
         "the period's consolidated result (rejected periods included) -- the "
         "JSONL on stdout is unchanged; use --log-all-windows for every window",
     )
-    parser.add_argument("--gate", type=str, default=None, choices=["none", "spacebar"])
+    parser.add_argument("--gate", type=str, default=None, choices=["none", "spacebar", "wakeword"])
     parser.add_argument("--gate-period", dest="gate_period_s", type=float, default=None)
+    parser.add_argument(
+        "--wakeword-model",
+        dest="wakeword_model",
+        type=str,
+        default=None,
+        help="registry name / run dir / file for --gate wakeword's own model "
+        "(independent of --model, which is the VCM decode model)",
+    )
+    parser.add_argument(
+        "--wakeword-backend",
+        dest="wakeword_backend",
+        type=str,
+        default=None,
+        choices=["onnx", "torch"],
+    )
+    parser.add_argument(
+        "--wakeword-onnx-variant",
+        dest="wakeword_onnx_variant",
+        type=str,
+        default=None,
+        choices=["fp32", "int8"],
+    )
+    parser.add_argument(
+        "--wakeword-threshold",
+        dest="wakeword_threshold",
+        type=float,
+        default=None,
+        help="softmax probability of the _wakeword_ class --gate wakeword opens a period at",
+    )
     return parser
 
 
@@ -194,6 +229,12 @@ def _print_banner(
     license_note = meta.get("license", LICENSE_NOTE)
     if cfg.gate == "none":
         gate_line = "listening gate: none"
+    elif cfg.gate == "wakeword":
+        gate_line = (
+            f"listening gate: wakeword (backend={cfg.wakeword_backend} "
+            f"threshold={cfg.wakeword_threshold}, opens a {cfg.gate_period_s} s "
+            "listening period on detection)"
+        )
     else:
         gate_line = (
             "listening gate: spacebar "
@@ -230,9 +271,9 @@ def main(argv: Optional[list[str]] = None) -> None:
             "spacebar (with --gate-period for the period length) -- --gate "
             "none is not a valid combination with --policy mode_period"
         )
-    if cfg.gate == "spacebar" and cfg.policy not in ("mode_period", "single_period"):
+    if cfg.gate != "none" and cfg.policy not in ("mode_period", "single_period"):
         raise SystemExit(
-            "--gate spacebar opens a bounded listening period that only "
+            f"--gate {cfg.gate} opens a bounded listening period that only "
             "--policy mode_period or --policy single_period consumes: pass one, or "
             "use --gate none with --policy threshold"
         )
@@ -241,10 +282,27 @@ def main(argv: Optional[list[str]] = None) -> None:
 
     gate: Optional[ListeningGate] = None
     if cfg.gate != "none":
+        wakeword_backend: Optional[WakewordInferenceBackend] = None
+        if cfg.gate == "wakeword":
+            # Fail fast on a missing wakeword checkpoint/export before the
+            # microphone is opened -- same slot/rationale as the spacebar
+            # gate's GateUnavailableError handling below.
+            wakeword_model_path = resolve_wakeword_model(
+                cfg.wakeword_model, cfg.wakeword_backend, cfg.wakeword_onnx_variant
+            )
+            if cfg.wakeword_backend == "onnx":
+                wakeword_backend = WakewordOnnxBackend(wakeword_model_path, ort_threads=cfg.ort_threads)
+            else:
+                wakeword_backend = WakewordTorchBackend(wakeword_model_path, device=cfg.device)
         # Fail fast on a non-interactive stdin (piped/CI) before the
         # microphone is opened -- mirrors MicrophoneUnavailableError.
         try:
-            gate = resolve_gate(cfg.gate, period_s=cfg.gate_period_s)
+            gate = resolve_gate(
+                cfg.gate,
+                period_s=cfg.gate_period_s,
+                wakeword_backend=wakeword_backend,
+                wakeword_threshold=cfg.wakeword_threshold,
+            )
         except GateUnavailableError as exc:
             raise SystemExit(str(exc)) from None
         if cfg.log_periods:

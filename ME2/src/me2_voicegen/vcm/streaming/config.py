@@ -40,7 +40,8 @@ from pathlib import Path
 from typing import Any, Mapping, Optional
 
 from me2_voicegen.vcm.evaluate import GRAMMAR_REGISTRY
-from me2_voicegen.vcm.streaming.gate import ListeningGate
+from me2_voicegen.vcm.streaming import wakeword_gate
+from me2_voicegen.vcm.streaming.gate import DEFAULT_WAKEWORD_THRESHOLD, GATE_REGISTRY, ListeningGate
 from me2_voicegen.vcm.streaming.policy import (
     AcceptancePolicy,
     ModePeriodPolicy,
@@ -49,11 +50,22 @@ from me2_voicegen.vcm.streaming.policy import (
     ThresholdPolicy,
 )
 
+# "wakeword" is registered here rather than in gate.py itself: wakeword_gate.py
+# imports ListeningGate/GateState/DEFAULT_WAKEWORD_THRESHOLD from gate.py, so
+# gate.py importing wakeword_gate.py back would be a cycle. This module is
+# where the other registries (MODEL_REGISTRY, POLICY_REGISTRY) already live,
+# so it's where this registration lives too.
+GATE_REGISTRY["wakeword"] = wakeword_gate.WakeWordGate
+
 PROJECT_ROOT = Path(__file__).resolve().parents[4]
 
 MODEL_REGISTRY: dict[str, Path] = {
     "optionc": PROJECT_ROOT / "out" / "vcm" / "optionb-optionc",
     "default": PROJECT_ROOT / "out" / "vcm" / "optionb",
+}
+
+WAKEWORD_MODEL_REGISTRY: dict[str, Path] = {
+    "default": PROJECT_ROOT / "out" / "wakeword",
 }
 
 POLICY_REGISTRY: dict[str, type[AcceptancePolicy]] = {
@@ -102,12 +114,18 @@ _FIELD_TYPES: dict[str, type] = {
     "gate_period_s": float,
     "log_periods": bool,
     "required_command_margin": float,
+    "wakeword_model": str,
+    "wakeword_backend": str,
+    "wakeword_onnx_variant": str,
+    "wakeword_threshold": float,
 }
 
 _FIELD_CHOICES: dict[str, tuple[str, ...]] = {
     "backend": ("onnx", "torch"),
     "onnx_variant": ("fp32", "int8"),
-    "gate": ("none", "spacebar"),
+    "gate": ("none", "spacebar", "wakeword"),
+    "wakeword_backend": ("onnx", "torch"),
+    "wakeword_onnx_variant": ("fp32", "int8"),
 }
 
 _NULLABLE_FIELDS = frozenset(
@@ -186,6 +204,10 @@ class StreamingConfig:
     gate_period_s: float = 5.0
     log_periods: bool = False
     required_command_margin: Optional[float] = None
+    wakeword_model: str = "default"
+    wakeword_backend: str = "torch"
+    wakeword_onnx_variant: str = "fp32"
+    wakeword_threshold: float = DEFAULT_WAKEWORD_THRESHOLD
 
     @classmethod
     def from_json(cls, path: str | Path) -> "StreamingConfig":
@@ -228,14 +250,16 @@ class StreamingConfig:
         return dataclasses.replace(base, **overrides)
 
 
-def _candidate_run_dir(model: str) -> Optional[Path]:
+def _candidate_run_dir(model: str, *, registry: dict[str, Path] = MODEL_REGISTRY) -> Optional[Path]:
     """Best-effort run-dir for threshold resolution. Registry name -> its
     run dir. Existing directory -> itself. A direct file living under
     `<run_dir>/checkpoints/` or `<run_dir>/export/` -> its run dir. Anything
     else (e.g. a bare file with no recognizable run-dir layout) -> `None`,
-    which `resolve_threshold` treats as "no report to read"."""
-    if model in MODEL_REGISTRY:
-        return MODEL_REGISTRY[model]
+    which `resolve_threshold` treats as "no report to read". `registry`
+    defaults to `MODEL_REGISTRY` (VCM); `resolve_model` passes
+    `WAKEWORD_MODEL_REGISTRY` for the wakeword gate's own model."""
+    if model in registry:
+        return registry[model]
     candidate = Path(model)
     if candidate.is_dir():
         return candidate
@@ -244,29 +268,45 @@ def _candidate_run_dir(model: str) -> Optional[Path]:
     return None
 
 
-def resolve_model(model: str, backend: str, variant: str = "fp32") -> Path:
+def resolve_model(
+    model: str,
+    backend: str,
+    variant: str = "fp32",
+    *,
+    registry: dict[str, Path] = MODEL_REGISTRY,
+    model_prefix: str = "vcm_model",
+    checkpoint_name: str = "checkpoint.pt",
+) -> Path:
     """Registry-name / run-dir / direct-file resolution for `--model`.
-    `backend='onnx'` resolves to `<run_dir>/export/vcm_model.{variant}.onnx`;
-    `backend='torch'` resolves to `<run_dir>/checkpoints/checkpoint.pt`. A
+    `backend='onnx'` resolves to `<run_dir>/export/<model_prefix>.{variant}.onnx`;
+    `backend='torch'` resolves to `<run_dir>/checkpoints/<checkpoint_name>`. A
     direct existing file is returned as-is regardless of `backend`/`variant`
-    -- the caller named it explicitly."""
+    -- the caller named it explicitly.
+
+    `registry`/`model_prefix`/`checkpoint_name` default to today's VCM
+    values so every existing call site (`resolve_model(cfg.model,
+    cfg.backend, cfg.onnx_variant)`) is unaffected; the wakeword gate calls
+    this with `registry=WAKEWORD_MODEL_REGISTRY, model_prefix="wakeword_model"`
+    instead of duplicating this function (per `vcm.export_onnx`'s own
+    `wakeword_model.{variant}.onnx` / `checkpoints/checkpoint.pt` layout,
+    which already mirrors the VCM layout one-for-one)."""
     if backend not in ("onnx", "torch"):
         raise SystemExit(f"unknown --backend {backend!r}; choices are ['onnx', 'torch']")
 
-    if model not in MODEL_REGISTRY:
+    if model not in registry:
         candidate = Path(model)
         if candidate.is_file():
             return candidate
 
-    run_dir = _candidate_run_dir(model)
+    run_dir = _candidate_run_dir(model, registry=registry)
     if run_dir is None or not run_dir.is_dir():
         raise SystemExit(
-            f"--model {model!r} is not a registry name ({sorted(MODEL_REGISTRY)}), "
+            f"--model {model!r} is not a registry name ({sorted(registry)}), "
             f"an existing run directory, or an existing file."
         )
 
     if backend == "onnx":
-        artifact = run_dir / "export" / f"vcm_model.{variant}.onnx"
+        artifact = run_dir / "export" / f"{model_prefix}.{variant}.onnx"
         if not artifact.exists():
             raise SystemExit(
                 f"{run_dir} has no export/{artifact.name} (no ONNX artifact for "
@@ -276,14 +316,28 @@ def resolve_model(model: str, backend: str, variant: str = "fp32") -> Path:
             )
         return artifact
 
-    artifact = run_dir / "checkpoints" / "checkpoint.pt"
+    artifact = run_dir / "checkpoints" / checkpoint_name
     if not artifact.exists():
         raise SystemExit(
-            f"{run_dir} has no checkpoints/checkpoint.pt -- re-run vcm.train against "
+            f"{run_dir} has no checkpoints/{checkpoint_name} -- re-run vcm.train against "
             f"this run dir, or point --model at a run dir/checkpoint file that has "
             f"one, or pass --backend onnx to use an ONNX export instead."
         )
     return artifact
+
+
+def resolve_wakeword_model(model: str, backend: str, variant: str = "fp32") -> Path:
+    """`resolve_model` specialized for the wakeword gate's own model
+    selection (`WAKEWORD_MODEL_REGISTRY`, artifact prefix
+    `wakeword_model`) -- independent of `--model`/`--backend`, which
+    resolve the VCM decode model the gate sits beside."""
+    return resolve_model(
+        model,
+        backend,
+        variant,
+        registry=WAKEWORD_MODEL_REGISTRY,
+        model_prefix="wakeword_model",
+    )
 
 
 def resolve_threshold(

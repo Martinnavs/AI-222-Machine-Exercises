@@ -15,10 +15,12 @@ from me2_voicegen.vcm.streaming.config import (
     FALLBACK_THRESHOLD,
     MODEL_REGISTRY,
     POLICY_REGISTRY,
+    WAKEWORD_MODEL_REGISTRY,
     StreamingConfig,
     resolve_model,
     resolve_policy,
     resolve_threshold,
+    resolve_wakeword_model,
 )
 from me2_voicegen.vcm.streaming.policy import ModePeriodPolicy, ThresholdPolicy
 
@@ -117,6 +119,67 @@ def test_resolve_model_unknown_backend_is_system_exit(tmp_path):
     run_dir = _make_run_dir(tmp_path)
     with pytest.raises(SystemExit):
         resolve_model(str(run_dir), backend="tensorflow")
+
+
+# ---------------------------------------------------------------------------
+# resolve_model generalization (registry/model_prefix/checkpoint_name) --
+# feature `wakeword-gate`. The wakeword gate's own model selection reuses
+# resolve_model rather than duplicating it; these tests pin that today's
+# VCM-prefix behavior above is unaffected by the new keyword-only params,
+# and that the wakeword-prefix path resolves correctly through the same
+# function.
+# ---------------------------------------------------------------------------
+
+
+def _make_wakeword_run_dir(tmp_path, name="wakeword-run", with_export=True, with_checkpoint=True, variants=("fp32",)):
+    run_dir = tmp_path / name
+    if with_export:
+        export_dir = run_dir / "export"
+        export_dir.mkdir(parents=True)
+        for variant in variants:
+            (export_dir / f"wakeword_model.{variant}.onnx").write_bytes(b"fake-onnx")
+    if with_checkpoint:
+        ckpt_dir = run_dir / "checkpoints"
+        ckpt_dir.mkdir(parents=True)
+        (ckpt_dir / "checkpoint.pt").write_bytes(b"fake-checkpoint")
+    return run_dir
+
+
+def test_resolve_wakeword_model_onnx_uses_wakeword_prefix(tmp_path):
+    run_dir = _make_wakeword_run_dir(tmp_path)
+    path = resolve_wakeword_model(str(run_dir), backend="onnx", variant="fp32")
+    assert path == run_dir / "export" / "wakeword_model.fp32.onnx"
+
+
+def test_resolve_wakeword_model_torch(tmp_path):
+    run_dir = _make_wakeword_run_dir(tmp_path)
+    path = resolve_wakeword_model(str(run_dir), backend="torch")
+    assert path == run_dir / "checkpoints" / "checkpoint.pt"
+
+
+def test_resolve_wakeword_model_registry_name(monkeypatch, tmp_path):
+    run_dir = _make_wakeword_run_dir(tmp_path)
+    monkeypatch.setitem(WAKEWORD_MODEL_REGISTRY, "fake-wakeword-entry", run_dir)
+    path = resolve_wakeword_model("fake-wakeword-entry", backend="onnx")
+    assert path == run_dir / "export" / "wakeword_model.fp32.onnx"
+
+
+def test_resolve_wakeword_model_missing_export_error_names_wakeword_prefix(tmp_path):
+    run_dir = _make_wakeword_run_dir(tmp_path, with_export=False, with_checkpoint=True)
+    with pytest.raises(SystemExit) as excinfo:
+        resolve_wakeword_model(str(run_dir), backend="onnx")
+    assert "wakeword_model.fp32.onnx" in str(excinfo.value)
+
+
+def test_resolve_model_default_prefix_and_registry_unchanged_by_generalization(tmp_path):
+    """The new registry/model_prefix/checkpoint_name kwargs are
+    keyword-only with defaults equal to today's VCM values -- every
+    existing `resolve_model(model, backend, variant)` call site is
+    unaffected. A wakeword-prefix-only run dir must NOT resolve through
+    the default (VCM-prefixed) call."""
+    run_dir = _make_wakeword_run_dir(tmp_path, with_checkpoint=False)  # only wakeword_model.fp32.onnx
+    with pytest.raises(SystemExit):
+        resolve_model(str(run_dir), backend="onnx")  # looks for vcm_model.fp32.onnx, not present
 
 
 # ---------------------------------------------------------------------------
@@ -305,6 +368,21 @@ def test_streaming_config_gate_field_defaults():
     config = StreamingConfig()
     assert config.gate == "none"
     assert config.gate_period_s == 5.0
+
+
+def test_streaming_config_wakeword_field_defaults():
+    config = StreamingConfig()
+    assert config.wakeword_model == "default"
+    assert config.wakeword_backend == "torch"
+    assert config.wakeword_onnx_variant == "fp32"
+    assert config.wakeword_threshold == pytest.approx(0.9)
+
+
+def test_from_json_accepts_gate_wakeword(tmp_path):
+    config_path = tmp_path / "config.json"
+    config_path.write_text(json.dumps({"gate": "wakeword"}))
+    config = StreamingConfig.from_json(config_path)
+    assert config.gate == "wakeword"
 
 
 def test_policy_registry_contains_mode_period():

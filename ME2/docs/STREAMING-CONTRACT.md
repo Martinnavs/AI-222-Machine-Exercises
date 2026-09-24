@@ -676,6 +676,58 @@ line is a human echo, and a debouncer-suppressed accept shows up as the
 digest line without a following trigger line (plus the run summary's
 `suppressed` count).
 
+### `WakeWordGate` -- the trained DS-CNN, in place of the keypress
+
+Feature `wakeword-gate` (`feature-engineering/wakeword-gate/SPEC.md`)
+implements the wake-word gate this section originally only promised was
+possible: `WakeWordGate` (`vcm/streaming/wakeword_gate.py`) satisfies
+`ListeningGate` by running the trained wakeword DS-CNN (feature
+`wakeword-dscnn`) against the same ring-buffer `window` `SpacebarGate`
+ignores, with **zero changes to `AcceptancePolicy`/`StreamingRunner`**.
+
+`poll(samples_seen, window)` takes the **trailing** `WAKEWORD_WINDOW_SECONDS`
+(1.5s) slice of `window` -- never a centered crop of the whole buffer, which
+can be several seconds long (`period_s + window_s`) and would otherwise let
+the classifier score stale audio from earlier in the period.
+`wakeword.augment.center_window` is reused only for its zero-pad branch (the
+buffer hasn't filled 1.5s yet); it's a no-op once the input is already
+exactly `WAKEWORD_WINDOW_SAMPLES` long. The cropped waveform goes through
+the same `LogMelFeatureExtractor` front-end and `DSCNN` forward pass the
+wakeword training/eval pipeline uses, then a softmax over the 3-way logits;
+crossing `threshold` (default `DEFAULT_WAKEWORD_THRESHOLD = 0.9`) opens/
+restarts the period at `samples_seen` -- identical discard-and-restart
+semantics to a `SpacebarGate` re-press, so `ModePeriodPolicy`/
+`SinglePeriodPolicy` consume it unmodified.
+
+Two inference backends, mirroring `InferenceBackend`'s `OnnxBackend`/
+`TorchBackend` split but classifier-shaped (`wakeword_prob(waveform) ->
+float`, not `logp_for_waveform`'s `(T, alphabet)`):
+`WakewordOnnxBackend`/`WakewordTorchBackend`. `WakewordTorchBackend` loads
+its checkpoint via `torch.load(..., weights_only=True)`, refusing rather
+than silently falling back to unsafe pickle deserialization -- the same
+convention `TorchBackend` uses (`backends.py`'s module docstring), not
+`vcm.export_onnx.load_checkpoint`'s plain `torch.load`.
+
+`GATE_REGISTRY["wakeword"]` is registered as a module-level side effect in
+`config.py` (not in `gate.py` itself) to avoid a `gate.py` <->
+`wakeword_gate.py` import cycle -- the same place `MODEL_REGISTRY`/
+`POLICY_REGISTRY` already live. `resolve_gate` gained optional
+`wakeword_backend`/`wakeword_threshold` kwargs and branches on
+`name == "wakeword"` to use them instead of `stdin`.
+
+CLI: `--gate none|spacebar|wakeword`, `--wakeword-model` (registry name /
+run dir / file, independent of `--model`, which is the VCM decode model),
+`--wakeword-backend {onnx,torch}` (default `torch`), `--wakeword-onnx-variant
+{fp32,int8}`, `--wakeword-threshold` (default `0.9`). The `--gate`/`--policy`
+cross-validation in `main()` is generalized from `cfg.gate == "spacebar"` to
+`cfg.gate != "none"` -- a wakeword gate is exactly as bound-to-a-period as
+spacebar. `make stream-wakeword` is the Makefile convenience target
+(mirrors `stream-single-period`).
+
+No detection-threshold calibration pipeline (unlike VCM's per-grammar
+`chosen_operating_threshold` resolved from `eval_report.json`) -- a fixed
+default, tunable by hand. Deferred as future work per the feature's SPEC.
+
 ### Product-level integration (still not decided): cold start
 
 > Cold start is non-trivial (`torch`/`torchaudio` imported at module

@@ -1,10 +1,11 @@
 """The listening-gate seam: whether the runner is currently inside a
-bounded listening period. `SpacebarGate` is the shipped stand-in for the
-future wake-word detector: the operator presses SPACE to open a
-`period_s`-long period, a re-press discards and restarts it, and it
-auto-closes at the period end. A wake-word gate satisfies the same
-`ListeningGate` protocol with zero policy/runner changes. See
-`ME2/docs/STREAMING-CONTRACT.md` for the pipeline position (the gate
+bounded listening period. `SpacebarGate` is the manual stand-in: the
+operator presses SPACE to open a `period_s`-long period, a re-press
+discards and restarts it, and it auto-closes at the period end. The
+trained wake-word model satisfies the same `ListeningGate` protocol with
+zero policy/runner changes -- see `WakeWordGate` in `wakeword_gate.py`
+(feature `wakeword-gate`, `feature-engineering/wakeword-gate/SPEC.md`).
+See `ME2/docs/STREAMING-CONTRACT.md` for the pipeline position (the gate
 sits between the observation stream and the acceptance policy).
 
 SECURITY: the only input is the trusted local operator's own TTY
@@ -21,11 +22,18 @@ import select
 import sys
 import termios
 from dataclasses import dataclass
-from typing import Optional, Protocol
+from typing import Any, Optional, Protocol
 
 import numpy as np
 
 from ...common.features import SAMPLE_RATE
+
+# Default confidence threshold (softmax probability of the `_wakeword_`
+# class) `WakeWordGate` opens a period at. Single source of truth: defined
+# here (not in `wakeword_gate.py`) so `resolve_gate` can default to it
+# without importing that module -- see the `GATE_REGISTRY` note below for
+# why that import direction is avoided.
+DEFAULT_WAKEWORD_THRESHOLD: float = 0.9
 
 
 @dataclass(frozen=True)
@@ -134,15 +142,41 @@ class SpacebarGate:
         self._closed = True
 
 
+# Holds only "spacebar" here. "wakeword" is registered as a module-level
+# side effect by `config.py` (`GATE_REGISTRY["wakeword"] = WakeWordGate`),
+# not imported here directly: `wakeword_gate.py` imports `ListeningGate`/
+# `GateState`/`DEFAULT_WAKEWORD_THRESHOLD` from this module, so importing
+# `wakeword_gate` from here would be a cycle. `config.py` is where the
+# other registries (`MODEL_REGISTRY`, `POLICY_REGISTRY`) already live, so
+# that's where this registration lives too.
 GATE_REGISTRY: dict[str, type[ListeningGate]] = {"spacebar": SpacebarGate}
 
 
-def resolve_gate(name: str, *, period_s: float, stdin=sys.stdin) -> ListeningGate:
-    """Unknown name -> SystemExit naming sorted(GATE_REGISTRY)."""
+def resolve_gate(
+    name: str,
+    *,
+    period_s: float,
+    stdin=sys.stdin,
+    wakeword_backend: Optional[Any] = None,
+    wakeword_threshold: float = DEFAULT_WAKEWORD_THRESHOLD,
+) -> ListeningGate:
+    """Unknown name -> SystemExit naming sorted(GATE_REGISTRY). `name ==
+    "wakeword"` takes a different constructor shape (a `WakewordInference
+    Backend` instead of `stdin`) -- `wakeword_backend` must be supplied by
+    the caller in that case (an internal-wiring error otherwise, not a
+    user-facing one: `__main__.py` always builds the backend before
+    calling this for `--gate wakeword`)."""
     try:
         gate_cls = GATE_REGISTRY[name]
     except KeyError:
         raise SystemExit(
             f"unknown --gate {name!r}; choices are {sorted(GATE_REGISTRY)}"
         ) from None
+    if name == "wakeword":
+        if wakeword_backend is None:
+            raise SystemExit(
+                "internal error: --gate wakeword requires a wakeword_backend "
+                "(resolve_gate was called without constructing one first)"
+            )
+        return gate_cls(wakeword_backend, threshold=wakeword_threshold, period_s=period_s)
     return gate_cls(stdin, period_s=period_s)
