@@ -13,7 +13,12 @@ from me2_voicegen.vcm.optionb.transcript import prepare_ctc_transcript
 from me2_voicegen.vcm.alphabet import encode
 from me2_voicegen.vcm.text import CONVERSIONS_V2_DIR, normalize_text, resolve_transcript
 
-REAL_OPTIONB_MANIFEST = CONVERSIONS_V2_DIR / "optionb" / "manifest.csv"
+# The live-upstream refresh (docs/OPTIONB-GRAMMAR-CONTRACT.md §6): OPTIONB_GRAMMAR
+# now follows optionb-v3's upstream commit, not the pinned optionb/ baseline
+# (which is deliberately left un-refetched/unchanged as a reproducible
+# snapshot -- its 7 changed intents' old transcripts are no longer grammar
+# -accepted under the refreshed grammar, by design).
+REAL_OPTIONB_MANIFEST = CONVERSIONS_V2_DIR / "optionb-v3" / "manifest.csv"
 
 
 def test_spells_out_a_single_digit_run():

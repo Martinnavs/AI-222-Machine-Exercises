@@ -51,7 +51,7 @@ from me2_voicegen.vcm.streaming.policy import ModePeriodPolicy, WindowObservatio
 from me2_voicegen.vcm.streaming.runner import StreamingRunner
 from me2_voicegen.vcm.streaming.sources import MicrophoneUnavailableError
 
-PHRASE_A = "change the brightness to one hundred percent"
+PHRASE_A = "adjust brightness to one hundred percent"
 PHRASE_B = "volume up"
 
 _STRIDE_S = 0.25

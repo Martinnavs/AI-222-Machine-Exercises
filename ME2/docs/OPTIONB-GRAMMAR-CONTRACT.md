@@ -9,30 +9,31 @@ wins and this doc is stale and needs fixing.
 
 19 rules, each an `alt()` of exactly 3 literal phrasings/templates, verbatim
 from `docs/raw_requirements/optionb-dataset-readme.md`'s "Phrase variations"
-table, **with exactly one documented exception** (D1 below):
-`$CMD_VOLUME_DOWN`'s v2 follows the vendored manifest-transcript summary
-(`docs/raw_requirements/optionb-dataset-manifest-summary.md`) instead, because
-the README is stale on that one phrase and the manifest is ground truth. See
-`vcm.optionb.grammar.KNOWN_README_DIVERGENCES`.
+table, at the live-upstream refresh's vendored commit (§6). **No known
+divergences remain** -- `vcm.optionb.grammar.KNOWN_README_DIVERGENCES == []`
+(see the former D1, now resolved, in §4/§6).
+
+7 rules changed from the prior refresh: `PLAY_MUSIC`, `PAUSE`, `STOP`,
+`LIGHT_OFF`, `BRIGHTNESS`, `COLOR`, `CALL`.
 
 | Rule | v1 | v2 | v3 |
 |---|---|---|---|
-| `$CMD_PLAY_MUSIC` | Play music | Play a song | Start the music |
+| `$CMD_PLAY_MUSIC` | Play music | Start music | Play some music |
 | `$CMD_VOLUME_UP` | Volume up | Increase the volume | Turn the volume up |
-| `$CMD_VOLUME_DOWN` | Volume down | **Lower the volume** (D1 -- README says "Decrease the volume", stale) | Turn the volume down |
-| `$CMD_NEXT` | Skip song | Next song | Play next song |
-| `$CMD_PAUSE` | Pause | Pause the music | Pause this song |
-| `$CMD_STOP` | Stop song | Stop music | Stop playing music |
+| `$CMD_VOLUME_DOWN` | Volume down | Lower the volume | Turn the volume down |
+| `$CMD_NEXT` | Next song | Skip song | Play next song |
+| `$CMD_PAUSE` | Pause | Pause audio | Pause for now |
+| `$CMD_STOP` | Stop | Stop playing | End playback |
 | `$CMD_LIGHT_ON` | Lights on | Power on the lights | Turn on the lights |
-| `$CMD_LIGHT_OFF` | Lights off | Kill the lights | Turn off the lights |
-| `$CMD_BRIGHTNESS` | Brightness {percent} | Set the brightness to {percent} | Change the brightness to {percent} |
-| `$CMD_COLOR` | Color {color} | Change the lights to {color} | Set the lights to {color} |
+| `$CMD_LIGHT_OFF` | Lights out | Kill the lights | Shut off the lights |
+| `$CMD_BRIGHTNESS` | Brightness {percent} | Adjust brightness to {percent} | Brightness level {percent} |
+| `$CMD_COLOR` | Change color to {color} | Switch color to {color} | Set color to {color} |
 | `$CMD_TEMPERATURE` | Temperature {degrees} | Change the temperature to {degrees} | Set the temperature to {degrees} |
 | `$CMD_WEATHER` | Weather | What's the weather? | Tell me the weather |
 | `$CMD_TIME` | Time | What time is it? | Tell me the time |
 | `$CMD_TIMER` | Timer {duration} | Countdown for {duration} | Start a timer for {duration} |
 | `$CMD_ALARM` | Alarm {time} | Wake me up at {time} | Set an alarm for {time} |
-| `$CMD_CALL` | Call | Make a call | Make a phone call |
+| `$CMD_CALL` | Call | Place a call | Make a phone call |
 | `$CMD_MESSAGE` | Message | Send a message | Send my message |
 | `$CMD_CREATE_REMINDER` | Reminder {task} | Remind me to {task} | Create a reminder to {task} |
 | `$CMD_LIST_REMINDERS` | Reminders | Show my reminders | List my reminders |
@@ -106,9 +107,9 @@ lowercase string through a character trie and returns the terminal
 `None`. No fuzzy matching, no partial matches.
 
 **Canonical-93 vs accepted-129:** the canonical set is exactly the 93
-phrases the README's phrase-variation/slot-value tables describe, **with the
-one D1 substitution applied** (`"decrease the volume"` -> `"lower the
-volume"`):
+phrases the live-upstream README's phrase-variation/slot-value tables
+describe, verbatim -- no substitution needed, since `KNOWN_README_DIVERGENCES`
+is empty at this refresh:
 
 ```
 93 = 39 fixed (13 unslotted intents x 3 phrasings)
@@ -133,32 +134,31 @@ recorded with. This holds for the two-surface-form (digit/word) case too:
 never more, so the grammar never accepts a phrase absent from the
 93-canonical-plus-36-word-form set.
 
-**Strict-prefix note (D6), now test-enforced:** among the canonical 93,
-5 strict character-level prefix pairs exist (one phrase's text is a
+**Strict-prefix note (D6), now test-enforced, re-derived for this refresh
+(never carried over unchanged from a prior grammar):** among the canonical
+93, **6 strict character-level prefix pairs** exist (one phrase's text is a
 character-for-character prefix of another's) -- `"pause"` is a prefix of
-`"pause the music"` and `"pause this song"`; `"time"` is a prefix of
+`"pause audio"` and `"pause for now"`; `"stop"` is a prefix of `"stop
+playing"` (STOP's v1 is now the bare word "stop"); `"time"` is a prefix of
 `"timer 10 seconds"`, `"timer 30 seconds"`, and `"timer 1 minute"` (because
 "Timer" itself starts with "Time"). Adding the 36 word-form phrases
 introduces **3 more** instances of the same "time"/"timer ..." relationship
 (`"timer ten seconds"`, `"timer thirty seconds"`, `"timer one minute"`),
-for **8 total** strict-prefix pairs among the accepted 129 -- this is a
-necessary, unavoidable consequence of the README's own phrasing (any
-TIMER duration -- digit or word -- collides on this prefix with the TIME
-intent's own phrase), not a defect in the grammar. `tests/test_optionb_grammar.py::test_strict_prefix_pairs_exact_set`
-hardcodes and asserts this exact 8-pair set. Re-derived (not carried over
-unchanged) for D1's phrasing change: `"lower the volume"` introduces no new
-prefix relationship with any other accepted phrase, so the set stays 8 pairs
--- re-checked independently rather than assumed, per this task's own
-must-verify item (the exact staleness mistake made in the prior review, not
-to be repeated).
+for **9 total** strict-prefix pairs among the accepted 129 -- this is a
+necessary, unavoidable consequence of the README's own phrasing, not a
+defect in the grammar. `tests/test_optionb_grammar.py::test_strict_prefix_pairs_exact_set`
+hardcodes and asserts this exact 9-pair set, re-derived by scanning the
+actual compiled grammar's `all_phrases()` for this refresh rather than
+assumed from the prior (8-pair) count -- the exact staleness mistake this
+contract has previously flagged as a trap, not to be repeated.
 
-**D1 -- README/manifest divergence (resolved).** The real dataset's
-`manifest.csv` disagrees with the vendored README on exactly one phrase:
-`VOLUME_DOWN`'s v2 is `"Lower the volume"` in all 196 recorded rows of that
-transcript (zero rows say "Decrease the volume"), while the README says
-"Decrease the volume". The audio is ground truth; the README is stale
-documentation. `vcm.optionb.grammar.KNOWN_README_DIVERGENCES` records this one
-entry: `("VOLUME_DOWN", "decrease the volume", "lower the volume")`.
+**Former D1 -- README/manifest divergence (fully resolved upstream).**
+A prior refresh found the real dataset's `manifest.csv` disagreeing with the
+vendored README on exactly one phrase (`VOLUME_DOWN` v2: manifest said
+"Lower the volume", README said "Decrease the volume"). As of this refresh's
+vendored commit (§6), the live upstream README itself now reads "Lower the
+volume" -- the divergence was corrected at the source, not merely reconciled
+locally. `vcm.optionb.grammar.KNOWN_README_DIVERGENCES` is therefore `[]`.
 
 **Dual-anchor drift guard.** `tests/test_optionb_grammar.py` maintains two
 independent vendored anchors rather than one:
@@ -166,20 +166,16 @@ independent vendored anchors rather than one:
   derived from the real manifest's own `transcript` column --
   `test_drift_guard_manifest_matches_grammar` re-derives the canonical 93
   from it and asserts an exact match against both `CANONICAL_93` and
-  `OPTIONB_GRAMMAR`, with **no reconciliation needed** (it already reflects
-  "lower the volume").
+  `OPTIONB_GRAMMAR`.
 - **Secondary anchor:** `docs/raw_requirements/optionb-dataset-readme.md` --
   `test_drift_guard_readme_matches_grammar` re-derives the canonical 93 from
-  the README and reconciles the one known divergence via
-  `KNOWN_README_DIVERGENCES`: it asserts the raw README phrase
-  (`"decrease the volume"`) is **rejected** by the grammar (proving the
-  divergence is real, not a stale assumption baked into the test) before
-  substituting in the manifest-derived phrase for the rest of the
-  comparison. `test_known_readme_divergences_exactly_one_entry` pins the
-  table to exactly one entry.
+  the README and cross-checks it against `CANONICAL_93`/`OPTIONB_GRAMMAR`,
+  reconciling any future divergence via `KNOWN_README_DIVERGENCES` (empty at
+  this refresh). `test_known_readme_divergences_empty` pins the table to
+  zero entries.
 
 Both anchors stay live (neither is deleted or silenced) so that a future
-correction to either vendored source -- the README getting fixed, or a
+correction to either vendored source -- the README changing again, or a
 manifest re-fetch changing something -- is caught by a test failure rather
 than by nothing.
 
@@ -215,36 +211,43 @@ one taxonomy onto the other, reuse `vcm` decoder/model code against
 
 ## 6. Provenance and deferred decisions
 
-- Vendored sources: `docs/raw_requirements/optionb-dataset-readme.md`,
+- Vendored sources (current refresh): `docs/raw_requirements/optionb-dataset-readme.md`,
   copied verbatim from `markandrian30/AI231` at path `MEX2/OptionB/README.md`;
   and `docs/raw_requirements/optionb-dataset-manifest-summary.md`, derived
-  from the same repo's real `manifest.csv` at path `MEX2/OptionB/manifest.csv`
-  (commit `74cdfee2ff5a5d015fd951dad7b0ff396df4d47f`).
-- **Resolved finding (was: "Unknown (deferred)" -- the real `manifest.csv`'s
-  `transcript` and `slot value` column surface forms).** The manifest has
-  now been fetched and inspected directly. Finding: the manifest's slot
-  values are **byte-identical** to the README's slot-value table (no
-  digit-vs-word or folder-naming-convention surprises there); the phrase
-  templates match the README's "Phrase variations" table on **18 of 19**
-  intents exactly, with **exactly one divergence** (D1, `VOLUME_DOWN` v2,
-  see section 4). Canonical values now follow the manifest as the primary
-  source of truth, with the README kept as a live secondary anchor
-  (`KNOWN_README_DIVERGENCES` reconciles the one place they disagree).
-- **D12 (still deferred, unaffected by D1):** which additional ITN/punctuation
-  alias classes a real transcriber would emit against this grammar (e.g.
-  "6am" vs "6 am", "100%" vs "100 percent") remains unaddressed here --
-  the manifest's `transcript` column contains exact phrase-table text, no
-  such aliasing, so this finding does not resolve D12.
+  from the same repo's real `manifest.csv` at path `MEX2/OptionB/manifest.csv`.
+  Both fetched/derived **2026-09-24 at commit
+  `b9d86ea9a9ee0c0ec9f5cb475d5ec33e1aabfca0`** (supersedes the prior refresh's
+  `74cdfee2ff5a5d015fd951dad7b0ff396df4d47f`; the local dataset copy this
+  grammar is trained against lives at `out/conversions/v2/optionb-v3/`,
+  fetched via `me2_voicegen.vcm.optionb.fetch_dataset`; the prior
+  `out/conversions/v2/optionb/` copy is left untouched as a reproducible
+  baseline).
+- **Resolved finding (the real `manifest.csv`'s `transcript` and `slot
+  value` column surface forms).** The manifest has been fetched and
+  inspected directly at this refresh's commit. Finding: the manifest's slot
+  values remain **byte-identical** to the README's slot-value table; the
+  phrase templates now match the README's "Phrase variations" table on
+  **all 19** intents exactly -- the former one-phrase divergence (former D1,
+  `VOLUME_DOWN` v2) was corrected upstream in the README itself between the
+  two refreshes, so `KNOWN_README_DIVERGENCES` is `[]` (see section 4).
+- **D12 (still deferred):** which additional ITN/punctuation alias classes a
+  real transcriber would emit against this grammar (e.g. "6am" vs "6 am",
+  "100%" vs "100 percent") remains unaddressed here -- the manifest's
+  `transcript` column contains exact phrase-table text, no such aliasing, so
+  this refresh does not resolve D12.
 
 ## 7. Representation boundary (D13)
 
-**Verified vocabulary census** (enumerated directly from `OPTIONB_GRAMMAR.all_phrases()` and
-`vcm.optionb.numbers.spell_integer`; the module wins if this ever drifts): **80 unique alphabetic
-word types** across all 19 intents and all slot values (56 template words + 13 slot unit/value
-words + 11 spelled-number word tokens -- zero overlap between the three groups), plus the **12
-digit tokens** (1, 6, 8, 9, 10, 18, 20, 22, 26, 30, 60, 100). Canonical-93 surface token types =
-81 (69 non-numeric alphabetic tokens + 12 digit tokens, no spelled-number words); accepted-129
-surface token types = 92 (80 alphabetic + 12 digit).
+**Verified vocabulary census** (re-derived for this refresh, enumerated directly from
+`OPTIONB_GRAMMAR.all_phrases()` and `vcm.optionb.numbers.spell_integer`; the module wins if this
+ever drifts -- not copied forward from the prior refresh's count): **90 unique alphabetic word
+types** across all 19 intents and all slot values (66 template words + 13 slot unit/value words +
+11 spelled-number word tokens -- zero overlap between the three groups; the template-word count
+grew from the prior refresh's 56 because the 7 rewritten `CMD_*` rules introduce new words such as
+"adjust", "audio", "end", "level", "place", "playback", and "shut"), plus the **12 digit tokens**
+(1, 6, 8, 9, 10, 18, 20, 22, 26, 30, 60, 100). Canonical-93 surface token types = 91 (79
+non-numeric alphabetic tokens + 12 digit tokens, no spelled-number words); accepted-129 surface
+token types = 102 (90 alphabetic + 12 digit).
 
 `OPTIONB_RULES` (and every `CMD_*` alternative list feeding it) is built
 entirely out of word-sequence tuples -- `_vocab`, `_numeric_vocab`,

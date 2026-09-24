@@ -2,6 +2,7 @@
 vendor/
 models/
 out/
+raw_datasets/
 .pytest_cache/
 __pycache__/
 *.pyc

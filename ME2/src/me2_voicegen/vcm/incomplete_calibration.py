@@ -125,7 +125,7 @@ def single_word_commands(grammar: Grammar) -> frozenset[str]:
 
 def strict_prefix_commands(grammar: Grammar) -> frozenset[str]:
     """Accepted phrases that are themselves a proper whole-word prefix of a
-    DIFFERENT accepted phrase (e.g. "pause" prefixing "pause the music").
+    DIFFERENT accepted phrase (e.g. "pause" prefixing "pause audio").
     Distinct from `Grammar.incomplete_prefixes`: these are commands, not
     rejection competitors -- `docs/INCOMPLETE-GRAMMAR-REJECTION.md`'s
     completion criterion 4 requires they keep decoding normally."""

@@ -877,23 +877,32 @@ def test_jsonl_payload_key_set_unchanged():
         assert set(json.loads(line)) == expected_keys
 
 
-def _broken_color_logp(total_frames: int = 200) -> np.ndarray:
-    """Broken-`color` evidence: greedy text `color`, weak `time` terminal,
+def _broken_play_logp(total_frames: int = 200) -> np.ndarray:
+    """Broken-`play` evidence: greedy text `play`, weak `time` terminal,
     high-confidence trailing blanks (duplicate of the fixture in
     tests/test_vcm_decoder_incomplete_prefix.py -- tests/ is not a package,
     so duplication is the repo idiom for test helpers). With the
-    incomplete-prefix margin enabled, this decodes as a gate rejection."""
+    incomplete-prefix margin enabled, this decodes as a gate rejection.
+
+    `play` substitutes for the spec's original `color` example: the
+    live-upstream grammar refresh rewrote COLOR's phrasings so bare "color"
+    is no longer a designated incomplete prefix (docs/OPTIONB-GRAMMAR-CONTRACT.md
+    §6). `play` is a genuine `OPTIONB_GRAMMAR.incomplete_prefixes` member and,
+    unlike `color`/`alarm`, shares no characters with `time`
+    (see tests/test_vcm_decoder_incomplete_prefix.py for the full rationale
+    and the frame-layout math this mirrors)."""
     neq = float("-inf")
-    q_color, q_blank = 0.56, 0.44
-    q_time = math.exp((-6.98 - 5.0 * math.log(q_blank)) / 4.0)
+    play_len = 4  # len("play")
+    q_play, q_blank = 0.56, 0.44
+    q_time = math.exp((-6.98 - play_len * math.log(q_blank)) / 4.0)
     logp = np.full((total_frames, 29), neq, dtype=np.float64)
-    for t, ch in enumerate("color"):
-        logp[t, alphabet.CHAR_TO_ID[ch]] = math.log(q_color)
+    for t, ch in enumerate("play"):
+        logp[t, alphabet.CHAR_TO_ID[ch]] = math.log(q_play)
         logp[t, alphabet.BLANK_ID] = math.log(q_blank)
     for i, ch in enumerate("time"):
-        logp[5 + i, alphabet.CHAR_TO_ID[ch]] = math.log(q_time)
-        logp[5 + i, alphabet.BLANK_ID] = math.log(1.0 - q_time)
-    logp[9:, alphabet.BLANK_ID] = 0.0
+        logp[play_len + i, alphabet.CHAR_TO_ID[ch]] = math.log(q_time)
+        logp[play_len + i, alphabet.BLANK_ID] = math.log(1.0 - q_time)
+    logp[play_len + 4 :, alphabet.BLANK_ID] = 0.0
     return logp
 
 
@@ -920,7 +929,7 @@ def test_jsonl_keeps_key_set_and_surfaces_gate_rejection_via_existing_fields_onl
         out = io.StringIO()
         StreamingRunner(
             source=_ArrayAudioSource(np.zeros(24000, dtype=np.float32), block_samples=4000),
-            backend=_FixedLogpBackend(_broken_color_logp()),
+            backend=_FixedLogpBackend(_broken_play_logp()),
             grammar=OPTIONB_GRAMMAR,
             policy=ThresholdPolicy(threshold=-1e6),
             window_s=1.0,

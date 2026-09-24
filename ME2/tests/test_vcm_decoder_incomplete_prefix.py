@@ -4,25 +4,43 @@ no model -- log-posteriors are constructed directly, per the repo's
 `make_posterior` idiom (this module therefore imports no model code and the
 smoke fast-suite guard keeps it that way).
 
-The `color`-versus-`time` fixture reproduces the spec's documented failure
-behavior: unconstrained greedy collapses to `color`; the weak `time` terminal
-loses to the `color` prefix on raw beam log mass; and the `time` /T
+The `play`-versus-`time` fixture reproduces the spec's documented failure
+behavior: unconstrained greedy collapses to `play`; the weak `time` terminal
+loses to the `play` prefix on raw beam log mass; and the `time` /T
 confidence crosses the documented -0.1 threshold as high-confidence trailing
 blanks accumulate (rejected at T=44, accepted from T=70 on at threshold
 -0.1, matching the spec's table: about -0.158 / -0.099 / -0.046 / -0.028 at
-T = 44 / 70 / 151 / 251).
+T = 44 / 70 / 151 / 251 -- these frame counts depend only on TIME_RAW_TARGET
+and T, not on the broken-prefix word or its length, so they carry over
+unchanged from the spec's original fixture).
+
+`play` substitutes for the spec's original `color` example: the live-upstream
+grammar refresh (docs/OPTIONB-GRAMMAR-CONTRACT.md §6) rewrote COLOR's
+phrasings so bare "color" is no longer a whole-word prefix of any accepted
+command, hence no longer a designated `incomplete_prefix`. `play` is a
+genuine `OPTIONB_GRAMMAR.incomplete_prefixes` member (a prefix of "play
+music"/"play some music" but never itself accepted). Unlike the first
+substitute tried (`alarm`, same length as `color`), `play`'s letters
+(p, l, a, y) share nothing with `time`'s (t, i, m, e) or `set`'s (s, e, t) --
+`alarm` shares `m` with `time`, which opened an extra re-completion path
+through frame 7 (`time`'s own `m` frame) that inflated `alarm`'s raw beam
+mass above the single-path analytic value this fixture depends on. `play`
+is 4 characters, not 5, so the frame layout below is shifted by one frame
+relative to the spec's original `color` fixture; TIME_RAW_TARGET and the
+T=44/70/151/251 crossing points are unaffected since they depend only on
+`time`'s own 4 frames and the trailing blank duration.
 
 Fidelity note: the spec's measured raw masses (about -1.953 / -6.953, gap
 about -5) come from one deterministic acoustic reproduction. That exact pair
 is not attainable by a minimal per-frame posterior -- the frame-level mass
-constraints (greedy `color`, that /T crossing, and that gap together) are
+constraints (greedy `play`, that /T crossing, and that gap together) are
 jointly infeasible -- so this fixture pins the documented *behavior* instead:
 same greedy text, same threshold-crossing pattern at the same frame counts,
-a decisively negative raw-mass gap (about -1.41 log units), and an exactly
-T-invariant gap (unique optimal alignment). The spec explicitly warns
-against calibrating a margin from a single reproduction; the gate ships
-disabled (`required_command_margin=None`) and only the zero-margin decision
-boundary is asserted here.
+a decisively negative raw-mass gap, and an exactly T-invariant gap (unique
+optimal alignment). The spec explicitly warns against calibrating a margin
+from a single reproduction; the gate ships disabled
+(`required_command_margin=None`) and only the zero-margin decision boundary
+is asserted here.
 """
 
 from __future__ import annotations
@@ -41,63 +59,64 @@ PEAK = 20.0
 NEGINF = float("-inf")
 
 # ---------------------------------------------------------------------------
-# The broken `color` evidence fixture (spec's Step 4), pinned to behavior.
+# The broken `play` evidence fixture (spec's Step 4), pinned to behavior.
 # ---------------------------------------------------------------------------
 
-# Color-section frame (frames 0-4): the `color` char wins the argmax so the
-# greedy text is exactly "color"; the blank carries enough mass that the
+# Play-section frame (frames 0-3): the `play` char wins the argmax so the
+# greedy text is exactly "play"; the blank carries enough mass that the
 # `time` terminal's blank-out of these frames keeps its raw mass near the
 # spec's table values.
-Q_COLOR_CHAR = 0.56
-Q_COLOR_BLANK = 0.44
+PLAY_LEN = 4  # len("play")
+Q_PLAY_CHAR = 0.56
+Q_PLAY_BLANK = 0.44
 
 # The `time` terminal's raw log mass, pinned so its /T score crosses the
 # documented -0.1 threshold at the documented frame counts.
 TIME_RAW_TARGET = -6.98
-# Weak-time frames (5-8): one `time` char per frame at Q_TIME_CHAR, blank at
-# Q_TIME_BLANK (argmax = blank, so the greedy text stays "color"). The
+# Weak-time frames (4-7): one `time` char per frame at Q_TIME_CHAR, blank at
+# Q_TIME_BLANK (argmax = blank, so the greedy text stays "play"). The
 # one-frame-per-char localization gives the `time` terminal a UNIQUE optimal
 # alignment, so its raw mass -- and the gap -- is exactly T-invariant.
-Q_TIME_CHAR = math.exp((TIME_RAW_TARGET - 5.0 * math.log(Q_COLOR_BLANK)) / 4.0)
+Q_TIME_CHAR = math.exp((TIME_RAW_TARGET - PLAY_LEN * math.log(Q_PLAY_BLANK)) / 4.0)
 Q_TIME_BLANK = 1.0 - Q_TIME_CHAR
 
-COLOR_RAW_EXPECTED = 5.0 * math.log(Q_COLOR_CHAR) + 4.0 * math.log(Q_TIME_BLANK)
+PLAY_RAW_EXPECTED = PLAY_LEN * math.log(Q_PLAY_CHAR) + 4.0 * math.log(Q_TIME_BLANK)
 TIME_RAW_EXPECTED = TIME_RAW_TARGET
-GAP_EXPECTED = TIME_RAW_EXPECTED - COLOR_RAW_EXPECTED  # about -1.41, decisively < 0
+GAP_EXPECTED = TIME_RAW_EXPECTED - PLAY_RAW_EXPECTED  # decisively < 0
 
 
-def make_color_broken_posterior(total_frames: int) -> np.ndarray:
-    """(total_frames, 29) log-posterior (`total_frames >= 10`), valid rows.
+def make_play_broken_posterior(total_frames: int) -> np.ndarray:
+    """(total_frames, 29) log-posterior (`total_frames >= 9`), valid rows.
 
-    Frames 0-4: the `color` char at Q_COLOR_CHAR, blank at Q_COLOR_BLANK,
+    Frames 0-3: the `play` char at Q_PLAY_CHAR, blank at Q_PLAY_BLANK,
                 all other ids at -inf.
-    Frames 5-8: t, i, m, e each at Q_TIME_CHAR on its own frame, blank at
+    Frames 4-7: t, i, m, e each at Q_TIME_CHAR on its own frame, blank at
                 Q_TIME_BLANK, all other ids at -inf.
-    Frames 9..: blank with probability 1 (high-confidence trailing blanks).
+    Frames 8..: blank with probability 1 (high-confidence trailing blanks).
     """
     size = vcm_alphabet.ALPHABET_SIZE
     logp = np.full((total_frames, size), NEGINF, dtype=np.float64)
-    for t, ch in enumerate("color"):
-        logp[t, vcm_alphabet.CHAR_TO_ID[ch]] = math.log(Q_COLOR_CHAR)
-        logp[t, vcm_alphabet.BLANK_ID] = math.log(Q_COLOR_BLANK)
+    for t, ch in enumerate("play"):
+        logp[t, vcm_alphabet.CHAR_TO_ID[ch]] = math.log(Q_PLAY_CHAR)
+        logp[t, vcm_alphabet.BLANK_ID] = math.log(Q_PLAY_BLANK)
     for i, ch in enumerate("time"):
-        logp[5 + i, vcm_alphabet.CHAR_TO_ID[ch]] = math.log(Q_TIME_CHAR)
-        logp[5 + i, vcm_alphabet.BLANK_ID] = math.log(Q_TIME_BLANK)
-    logp[9:, vcm_alphabet.BLANK_ID] = 0.0
+        logp[PLAY_LEN + i, vcm_alphabet.CHAR_TO_ID[ch]] = math.log(Q_TIME_CHAR)
+        logp[PLAY_LEN + i, vcm_alphabet.BLANK_ID] = math.log(Q_TIME_BLANK)
+    logp[PLAY_LEN + 4 :, vcm_alphabet.BLANK_ID] = 0.0
     return logp
 
 
-def make_color_no_completion_posterior(total_frames: int) -> np.ndarray:
-    """Like `make_color_broken_posterior` but with NO `time` support at all:
-    strong `color` evidence followed by exact blank frames. No completed
+def make_play_no_completion_posterior(total_frames: int) -> np.ndarray:
+    """Like `make_play_broken_posterior` but with NO `time` support at all:
+    strong `play` evidence followed by exact blank frames. No completed
     terminal is reachable (there is no slot-value support anywhere), so this
     exercises the no-terminal + designated-prefix decision path."""
     size = vcm_alphabet.ALPHABET_SIZE
     logp = np.full((total_frames, size), NEGINF, dtype=np.float64)
-    for t, ch in enumerate("color"):
-        logp[t, vcm_alphabet.CHAR_TO_ID[ch]] = math.log(Q_COLOR_CHAR)
-        logp[t, vcm_alphabet.BLANK_ID] = math.log(Q_COLOR_BLANK)
-    logp[5:, vcm_alphabet.BLANK_ID] = 0.0
+    for t, ch in enumerate("play"):
+        logp[t, vcm_alphabet.CHAR_TO_ID[ch]] = math.log(Q_PLAY_CHAR)
+        logp[t, vcm_alphabet.BLANK_ID] = math.log(Q_PLAY_BLANK)
+    logp[PLAY_LEN:, vcm_alphabet.BLANK_ID] = 0.0
     return logp
 
 
@@ -129,14 +148,14 @@ LOW_THRESHOLD = -1.0  # near-one-hot posteriors score close to 0/frame
 
 
 # ---------------------------------------------------------------------------
-# Step 4: the deterministic broken `color` case.
+# Step 4: the deterministic broken `play` case.
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.parametrize("total_frames", [44, 70, 151, 251])
 @pytest.mark.parametrize("beam_width", [25, 50, 1000])
-def test_color_evidence_rejected_when_gate_enabled(total_frames, beam_width):
-    logp = make_color_broken_posterior(total_frames)
+def test_play_evidence_rejected_when_gate_enabled(total_frames, beam_width):
+    logp = make_play_broken_posterior(total_frames)
     result = dec.decode_utterance(
         logp,
         OPTIONB_GRAMMAR,
@@ -147,19 +166,19 @@ def test_color_evidence_rejected_when_gate_enabled(total_frames, beam_width):
     assert result.no_match
     assert result.intent is None
     assert result.slots == {}
-    assert result.text == "color"
+    assert result.text == "play"
     assert result.rejection_reason == "incomplete_prefix"
-    assert result.incomplete_prefix == "color"
+    assert result.incomplete_prefix == "play"
     assert result.grammar_text == "time"
     assert result.incomplete_gap < 0
     assert result.command_raw_score == pytest.approx(TIME_RAW_EXPECTED, abs=1e-6)
-    assert result.incomplete_raw_score == pytest.approx(COLOR_RAW_EXPECTED, abs=1e-6)
+    assert result.incomplete_raw_score == pytest.approx(PLAY_RAW_EXPECTED, abs=1e-6)
 
 
 def test_incomplete_gap_invariant_across_trailing_blank_duration():
     gaps = [
         dec.decode_utterance(
-            make_color_broken_posterior(T),
+            make_play_broken_posterior(T),
             OPTIONB_GRAMMAR,
             threshold=-0.1,
             beam_width=25,
@@ -176,7 +195,7 @@ def test_incomplete_gap_invariant_across_trailing_blank_duration():
     [(70, True), (151, True), (251, True), (44, False)],
 )
 def test_gate_disabled_reproduces_baseline(total_frames, accepted):
-    logp = make_color_broken_posterior(total_frames)
+    logp = make_play_broken_posterior(total_frames)
     result = dec.decode_utterance(logp, OPTIONB_GRAMMAR, threshold=-0.1)
     if accepted:
         # The documented false accept: raw mass is (nearly) constant while
@@ -192,7 +211,7 @@ def test_gate_disabled_reproduces_baseline(total_frames, accepted):
         assert result.intent is None
     # Gate off -> no rejection reason; the diagnostics are still exposed.
     assert result.rejection_reason is None
-    assert result.incomplete_prefix == "color"
+    assert result.incomplete_prefix == "play"
     assert result.incomplete_gap == pytest.approx(GAP_EXPECTED, abs=1e-6)
 
 
@@ -203,7 +222,11 @@ def test_gate_disabled_reproduces_baseline(total_frames, accepted):
 
 @pytest.mark.parametrize(
     ("text", "color_value"),
-    [("color red", "red"), ("color blue", "blue"), ("color green", "green")],
+    [
+        ("change color to red", "red"),
+        ("switch color to blue", "blue"),
+        ("set color to green", "green"),
+    ],
 )
 def test_color_commands_still_accepted_with_gate_enabled(text, color_value):
     result = dec.decode_utterance(
@@ -216,8 +239,9 @@ def test_color_commands_still_accepted_with_gate_enabled(text, color_value):
     assert result.intent == "COLOR"
     assert result.slots == {"COLOR": color_value}
     assert result.rejection_reason is None
-    # The completion beats its own `color` prefix on raw mass: the prefix's
-    # alignments must blank the slot-value signal frames.
+    # The completion beats its own `color`/`change`/`set`/`switch` prefix on
+    # raw mass: the prefix's alignments must blank the slot-value signal
+    # frames.
     assert result.incomplete_gap > 0
 
 
@@ -340,7 +364,7 @@ def test_no_terminal_without_designated_prefix_records_no_reason():
 
 @pytest.mark.parametrize("beam_width", [25, 1000])
 def test_strong_prefix_without_completion_rejects_with_reason(beam_width):
-    logp = make_color_no_completion_posterior(70)
+    logp = make_play_no_completion_posterior(70)
     result = dec.decode_utterance(
         logp,
         OPTIONB_GRAMMAR,
@@ -351,7 +375,7 @@ def test_strong_prefix_without_completion_rejects_with_reason(beam_width):
     assert result.no_match
     assert result.intent is None
     assert result.rejection_reason == "incomplete_prefix"
-    assert result.incomplete_prefix == "color"
+    assert result.incomplete_prefix == "play"
 
 
 def test_empty_input_gate_path_has_no_division_by_zero():
@@ -375,7 +399,7 @@ def test_empty_input_gate_path_has_no_division_by_zero():
 
 
 def test_batch_decode_threads_required_command_margin():
-    broken = make_color_broken_posterior(70)
+    broken = make_play_broken_posterior(70)
     clean = make_posterior("time")
     T = 70
 
@@ -396,7 +420,7 @@ def test_batch_decode_threads_required_command_margin():
     assert isinstance(gated, list) and len(gated) == 2
     assert gated[0].no_match
     assert gated[0].rejection_reason == "incomplete_prefix"
-    assert gated[0].incomplete_prefix == "color"
+    assert gated[0].incomplete_prefix == "play"
     assert gated[1].no_match is False
     assert gated[1].intent == "TIME"
 
@@ -418,7 +442,7 @@ def test_gap_equal_to_margin_passes_gate_and_one_ulp_above_rejects():
     """Ticket 02 E7: the gate is a strict `<` reject. `gap == margin` passes
     and the confidence threshold decides; one representable float above the
     gap flips the decision to a gate rejection."""
-    logp = make_color_broken_posterior(70)
+    logp = make_play_broken_posterior(70)
     measured = dec.decode_utterance(
         logp,
         OPTIONB_GRAMMAR,
@@ -460,7 +484,7 @@ def test_incomplete_gap_invariant_under_leading_blank_frames():
     Prepending high-confidence blank frames (blank prob 1.0, logp 0.0)
     shifts every raw mass by exactly 0, so the gate's raw-mass
     observables and the decision must be exactly unchanged."""
-    base = make_color_broken_posterior(70)
+    base = make_play_broken_posterior(70)
     blank_row = np.full(vcm_alphabet.ALPHABET_SIZE, float("-inf"), dtype=np.float64)
     blank_row[vcm_alphabet.BLANK_ID] = 0.0
     for k in (0, 5, 20):
@@ -476,7 +500,7 @@ def test_incomplete_gap_invariant_under_leading_blank_frames():
         assert result.rejection_reason == "incomplete_prefix"
         assert result.incomplete_gap == pytest.approx(GAP_EXPECTED, abs=1e-9)
         assert result.command_raw_score == pytest.approx(TIME_RAW_EXPECTED, abs=1e-9)
-        assert result.incomplete_raw_score == pytest.approx(COLOR_RAW_EXPECTED, abs=1e-9)
+        assert result.incomplete_raw_score == pytest.approx(PLAY_RAW_EXPECTED, abs=1e-9)
 
 
 def test_enabled_gate_noops_on_grammar_without_incomplete_prefixes():
@@ -497,23 +521,26 @@ def test_enabled_gate_noops_on_grammar_without_incomplete_prefixes():
     assert gated.command_raw_score == baseline.command_raw_score
 
 
-# Weak `set` path on frames 9-11 so BOTH designated incomplete prefixes
-# `color` and `set` sit in the beam, with `color` strictly stronger on raw
-# mass. (A weak `r` frame was tried first but is unsuitable: a later `r`
-# lets the `colo` beam re-complete `color` via the weak mass, which
-# contaminates `color`'s total.)
+# Weak `set` path on frames 8-10 (right where the fixed trailing-blank
+# region starts, PLAY_LEN + 4) so BOTH designated incomplete prefixes `play`
+# and `set` sit in the beam, with `play` strictly stronger on raw mass.
+# `set` shares no characters with `play`, so (unlike the spec's original
+# `color`, whose last char `r` could let a weak later `r` re-complete the
+# `colo` beam into `color`, contaminating its total) no such re-completion
+# risk exists here.
 Q_SET_CHAR = 0.01
 
 
-def make_color_two_prefix_posterior(total_frames: int) -> np.ndarray:
-    """The broken-`color` fixture plus a weak `set` path (ticket 04 E9).
-    The finite-mass beam entries are the 13 prefixes of the
-    color/time/set paths, all below the width-50 cutoff, so both designated
-    prefixes `color` and `set` are present with `color` the stronger."""
-    logp = make_color_broken_posterior(total_frames)
+def make_play_two_prefix_posterior(total_frames: int) -> np.ndarray:
+    """The broken-`play` fixture plus a weak `set` path (ticket 04 E9).
+    The finite-mass beam entries are the prefixes of the play/time/set
+    paths, all below the width-50 cutoff, so both designated prefixes
+    `play` and `set` are present with `play` the stronger."""
+    logp = make_play_broken_posterior(total_frames)
+    start = PLAY_LEN + 4
     for i, ch in enumerate("set"):
-        logp[9 + i, vcm_alphabet.CHAR_TO_ID[ch]] = math.log(Q_SET_CHAR)
-        logp[9 + i, vcm_alphabet.BLANK_ID] = math.log(1.0 - Q_SET_CHAR)
+        logp[start + i, vcm_alphabet.CHAR_TO_ID[ch]] = math.log(Q_SET_CHAR)
+        logp[start + i, vcm_alphabet.BLANK_ID] = math.log(1.0 - Q_SET_CHAR)
     return logp
 
 
@@ -521,23 +548,24 @@ def test_strongest_designated_prefix_is_the_only_competitor():
     """Ticket 02 E9: with multiple designated incomplete prefixes in the
     beam, only the single strongest raw `total()` participates -- no
     summing, no veto by count."""
-    logp = make_color_two_prefix_posterior(70)
+    logp = make_play_two_prefix_posterior(70)
     # Ground truth from the same beam the decoder consumes: both designated
-    # prefixes are present and `color` is strictly stronger.
+    # prefixes are present and `play` is strictly stronger.
     beams = dec.prefix_beam_search(logp, OPTIONB_GRAMMAR.root, beam_width=50)
     designated_in_beam = {
         p: beams[p].total()
         for p in OPTIONB_GRAMMAR.incomplete_prefixes
         if p in beams and math.isfinite(beams[p].total())
     }
-    assert "color" in designated_in_beam
+    assert "play" in designated_in_beam
     assert "set" in designated_in_beam
     strongest = max(designated_in_beam, key=designated_in_beam.get)
-    assert strongest == "color"
-    # `color`'s total is exactly the single color-path alignment (no `r`
-    # support after frame 4, so no re-completion): pin the analytic mass.
-    assert designated_in_beam["color"] == pytest.approx(
-        COLOR_RAW_EXPECTED + 3.0 * math.log(1.0 - Q_SET_CHAR), abs=1e-9
+    assert strongest == "play"
+    # `play`'s total is exactly the single play-path alignment (`play` shares
+    # no characters with `time` or `set`, so no re-completion): pin the
+    # analytic mass.
+    assert designated_in_beam["play"] == pytest.approx(
+        PLAY_RAW_EXPECTED + 3.0 * math.log(1.0 - Q_SET_CHAR), abs=1e-9
     )
 
     result = dec.decode_utterance(
@@ -558,7 +586,7 @@ def test_strongest_designated_prefix_is_the_only_competitor():
     assert result.incomplete_raw_score != pytest.approx(
         designated_in_beam["set"], abs=1e-3
     )
-    # Best terminal is `time`; the gap is the raw difference vs `color`.
+    # Best terminal is `time`; the gap is the raw difference vs `play`.
     # (`time`'s total includes a re-completion path through `set`'s weak
     # `e` on frame 10, so it is read from the ground-truth beam rather
     # than pinned analytically.)
@@ -627,7 +655,7 @@ def _predict_accept(baseline: dec.DecodeResult, threshold: float, margin: float)
 def test_sweep_margins_formula_matches_live_gated_decode(total_frames, margin_name):
     threshold = -0.1
     beam_width = 50
-    logp = make_color_broken_posterior(total_frames)
+    logp = make_play_broken_posterior(total_frames)
 
     baseline = dec.decode_utterance(
         logp,

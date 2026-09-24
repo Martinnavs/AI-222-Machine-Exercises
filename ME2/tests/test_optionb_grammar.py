@@ -34,8 +34,8 @@ MANIFEST_SUMMARY_PATH = (
 
 CANONICAL_93: list[tuple[str, str, dict]] = [
     ("play music", "PLAY_MUSIC", {}),
-    ("play a song", "PLAY_MUSIC", {}),
-    ("start the music", "PLAY_MUSIC", {}),
+    ("start music", "PLAY_MUSIC", {}),
+    ("play some music", "PLAY_MUSIC", {}),
     ("volume up", "VOLUME_UP", {}),
     ("increase the volume", "VOLUME_UP", {}),
     ("turn the volume up", "VOLUME_UP", {}),
@@ -46,17 +46,17 @@ CANONICAL_93: list[tuple[str, str, dict]] = [
     ("next song", "NEXT", {}),
     ("play next song", "NEXT", {}),
     ("pause", "PAUSE", {}),
-    ("pause the music", "PAUSE", {}),
-    ("pause this song", "PAUSE", {}),
-    ("stop song", "STOP", {}),
-    ("stop music", "STOP", {}),
-    ("stop playing music", "STOP", {}),
+    ("pause audio", "PAUSE", {}),
+    ("pause for now", "PAUSE", {}),
+    ("stop", "STOP", {}),
+    ("stop playing", "STOP", {}),
+    ("end playback", "STOP", {}),
     ("lights on", "LIGHT_ON", {}),
     ("power on the lights", "LIGHT_ON", {}),
     ("turn on the lights", "LIGHT_ON", {}),
-    ("lights off", "LIGHT_OFF", {}),
+    ("lights out", "LIGHT_OFF", {}),
     ("kill the lights", "LIGHT_OFF", {}),
-    ("turn off the lights", "LIGHT_OFF", {}),
+    ("shut off the lights", "LIGHT_OFF", {}),
     ("weather", "WEATHER", {}),
     ("what's the weather", "WEATHER", {}),
     ("tell me the weather", "WEATHER", {}),
@@ -64,7 +64,7 @@ CANONICAL_93: list[tuple[str, str, dict]] = [
     ("what time is it", "TIME", {}),
     ("tell me the time", "TIME", {}),
     ("call", "CALL", {}),
-    ("make a call", "CALL", {}),
+    ("place a call", "CALL", {}),
     ("make a phone call", "CALL", {}),
     ("message", "MESSAGE", {}),
     ("send a message", "MESSAGE", {}),
@@ -75,21 +75,21 @@ CANONICAL_93: list[tuple[str, str, dict]] = [
     ("brightness 20 percent", "BRIGHTNESS", {"PERCENT": "20 percent"}),
     ("brightness 60 percent", "BRIGHTNESS", {"PERCENT": "60 percent"}),
     ("brightness 100 percent", "BRIGHTNESS", {"PERCENT": "100 percent"}),
-    ("set the brightness to 20 percent", "BRIGHTNESS", {"PERCENT": "20 percent"}),
-    ("set the brightness to 60 percent", "BRIGHTNESS", {"PERCENT": "60 percent"}),
-    ("set the brightness to 100 percent", "BRIGHTNESS", {"PERCENT": "100 percent"}),
-    ("change the brightness to 20 percent", "BRIGHTNESS", {"PERCENT": "20 percent"}),
-    ("change the brightness to 60 percent", "BRIGHTNESS", {"PERCENT": "60 percent"}),
-    ("change the brightness to 100 percent", "BRIGHTNESS", {"PERCENT": "100 percent"}),
-    ("color red", "COLOR", {"COLOR": "red"}),
-    ("color blue", "COLOR", {"COLOR": "blue"}),
-    ("color green", "COLOR", {"COLOR": "green"}),
-    ("change the lights to red", "COLOR", {"COLOR": "red"}),
-    ("change the lights to blue", "COLOR", {"COLOR": "blue"}),
-    ("change the lights to green", "COLOR", {"COLOR": "green"}),
-    ("set the lights to red", "COLOR", {"COLOR": "red"}),
-    ("set the lights to blue", "COLOR", {"COLOR": "blue"}),
-    ("set the lights to green", "COLOR", {"COLOR": "green"}),
+    ("adjust brightness to 20 percent", "BRIGHTNESS", {"PERCENT": "20 percent"}),
+    ("adjust brightness to 60 percent", "BRIGHTNESS", {"PERCENT": "60 percent"}),
+    ("adjust brightness to 100 percent", "BRIGHTNESS", {"PERCENT": "100 percent"}),
+    ("brightness level 20 percent", "BRIGHTNESS", {"PERCENT": "20 percent"}),
+    ("brightness level 60 percent", "BRIGHTNESS", {"PERCENT": "60 percent"}),
+    ("brightness level 100 percent", "BRIGHTNESS", {"PERCENT": "100 percent"}),
+    ("change color to red", "COLOR", {"COLOR": "red"}),
+    ("change color to blue", "COLOR", {"COLOR": "blue"}),
+    ("change color to green", "COLOR", {"COLOR": "green"}),
+    ("switch color to red", "COLOR", {"COLOR": "red"}),
+    ("switch color to blue", "COLOR", {"COLOR": "blue"}),
+    ("switch color to green", "COLOR", {"COLOR": "green"}),
+    ("set color to red", "COLOR", {"COLOR": "red"}),
+    ("set color to blue", "COLOR", {"COLOR": "blue"}),
+    ("set color to green", "COLOR", {"COLOR": "green"}),
     ("temperature 18 degrees", "TEMPERATURE", {"DEGREES": "18 degrees"}),
     ("temperature 22 degrees", "TEMPERATURE", {"DEGREES": "22 degrees"}),
     ("temperature 26 degrees", "TEMPERATURE", {"DEGREES": "26 degrees"}),
@@ -154,8 +154,8 @@ _WORD_OF = dict(WORD_NUMBERS)
 _NUMERIC_TEMPLATES: dict[str, list[tuple[str, str]]] = {
     "BRIGHTNESS": [
         ("brightness {v}", "PERCENT"),
-        ("set the brightness to {v}", "PERCENT"),
-        ("change the brightness to {v}", "PERCENT"),
+        ("adjust brightness to {v}", "PERCENT"),
+        ("brightness level {v}", "PERCENT"),
     ],
     "TEMPERATURE": [
         ("temperature {v}", "DEGREES"),
@@ -310,28 +310,23 @@ def test_all_129_distinct_and_normalization_stable():
 # ---------------------------------------------------------------------------
 # Criterion 7: strict-prefix pairs.
 #
-# Established fact (ticket 02): among the canonical 93, exactly 5 strict
-# character-level prefix pairs exist ("pause"/"pause the music",
-# "pause"/"pause this song", "time"/"timer {duration}" x3 digit forms).
-# Verified finding of *this* task (deviation from that ticket assumption,
-# flagged for tech-lead): the same "time" vs "timer ..." relationship is a
-# necessary consequence of the README's own phrase text ("Timer" starts
-# with "Time") and recurs for the 3 TIMER word-form durations too, so the
-# accepted-129 set has 8 strict-prefix pairs, not 5. This hardcodes the
-# actual verified set rather than forcing an assertion that does not match
-# the grammar's real (README-derived) behavior.
-#
-# Re-derived, not assumed, for this ticket's VOLUME_DOWN v2 phrasing change
-# ("decrease the volume" -> "lower the volume"): re-ran the strict-prefix
-# scan over the new accepted-129 set independently rather than carrying the
-# 8-pair set over unchanged (the exact staleness mistake flagged as a trap in
-# this ticket). "lower the volume" introduces no new prefix relationship
-# with any other accepted phrase, so the set is unchanged at 8 pairs.
+# Re-derived for the live-upstream refresh (grammar @ b9d86ea or later; PAUSE
+# and STOP phrasings changed). "pause"/"pause the music" and
+# "pause"/"pause this song" no longer exist -- PAUSE's v2/v3 are now "pause
+# audio"/"pause for now", both still strict extensions of "pause" itself, so
+# the pause contribution stays 2 pairs, just with new right-hand sides. STOP
+# gains one new pair: STOP's v1 is now the bare word "stop" (was "stop
+# song"), and v2 "stop playing" is a strict extension of it. "time"/"timer
+# {duration}" (6 pairs: 3 digit forms + 3 word forms) is unaffected by any of
+# the 7 changed intents and is carried over unchanged. Total: 9 pairs, not 8
+# -- verified by scanning the actual compiled grammar's all_phrases(), not
+# assumed from the prior count.
 # ---------------------------------------------------------------------------
 
 EXPECTED_STRICT_PREFIX_PAIRS = {
-    ("pause", "pause the music"),
-    ("pause", "pause this song"),
+    ("pause", "pause audio"),
+    ("pause", "pause for now"),
+    ("stop", "stop playing"),
     ("time", "timer 10 seconds"),
     ("time", "timer 30 seconds"),
     ("time", "timer 1 minute"),
@@ -399,13 +394,13 @@ def test_reject_word_form_over_generation_per_numeric_slot(phrase):
 # Drift guard (D7/D8/D1): dual anchors.
 #
 # Two independently vendored sources are re-derived and cross-checked against
-# the grammar: the README (`optionb-dataset-readme.md`, secondary anchor,
-# known-stale on exactly one phrase) and the real manifest-transcript summary
-# (`optionb-dataset-manifest-summary.md`, primary anchor -- ground truth,
-# since it is derived from the actual recorded audio's transcripts, not from
-# hand-maintained documentation). The two anchors disagree on exactly one
-# phrase (`KNOWN_README_DIVERGENCES`); that disagreement is asserted and
-# documented below, never silently tolerated or hidden.
+# the grammar: the README (`optionb-dataset-readme.md`, secondary anchor) and
+# the real manifest-transcript summary (`optionb-dataset-manifest-summary.md`,
+# primary anchor -- ground truth, since it is derived from the actual
+# recorded audio's transcripts, not from hand-maintained documentation). As
+# of the live-upstream refresh the two anchors agree on every phrase
+# (`KNOWN_README_DIVERGENCES == []`); any future disagreement would be
+# asserted and documented via that list, never silently tolerated or hidden.
 # ---------------------------------------------------------------------------
 
 _PLACEHOLDER_TO_SLOT = {
@@ -486,9 +481,8 @@ def _derive_canonical_from_table(text: str) -> list[tuple[str, str, dict]]:
     return derived
 
 
-def test_known_readme_divergences_exactly_one_entry():
-    assert len(KNOWN_README_DIVERGENCES) == 1
-    assert KNOWN_README_DIVERGENCES == [("VOLUME_DOWN", "decrease the volume", "lower the volume")]
+def test_known_readme_divergences_empty():
+    assert KNOWN_README_DIVERGENCES == []
 
 
 def test_drift_guard_readme_matches_grammar():

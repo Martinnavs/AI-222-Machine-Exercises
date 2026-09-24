@@ -79,15 +79,14 @@ TASK: list[tuple[tuple[str, ...], str]] = _vocab("drink water", "study", "exerci
 # ---------------------------------------------------------------------------
 # $CMD_* rules -- one alt() of exactly 3 literal phrasings/templates each,
 # verbatim from docs/raw_requirements/optionb-dataset-readme.md's "Phrase
-# variations" table, with exactly one documented exception
-# (KNOWN_README_DIVERGENCES below): CMD_VOLUME_DOWN's v2 follows the vendored
-# manifest-transcript table (optionb-dataset-manifest-summary.md), not the
-# README, because the two disagree and the manifest is ground truth.
+# variations" table (live upstream @ the SHA recorded in
+# docs/OPTIONB-GRAMMAR-CONTRACT.md §6). No known divergences remain --
+# see KNOWN_README_DIVERGENCES below.
 # ---------------------------------------------------------------------------
 
 CMD_PLAY_MUSIC = with_intent(
     "PLAY_MUSIC",
-    alt(literal("play", "music"), literal("play", "a", "song"), literal("start", "the", "music")),
+    alt(literal("play", "music"), literal("start", "music"), literal("play", "some", "music")),
 )
 
 CMD_VOLUME_UP = with_intent(
@@ -95,9 +94,6 @@ CMD_VOLUME_UP = with_intent(
     alt(literal("volume", "up"), literal("increase", "the", "volume"), literal("turn", "the", "volume", "up")),
 )
 
-# v2 is "lower the volume", not the README's "decrease the volume" -- see
-# KNOWN_README_DIVERGENCES below; the real dataset's 196 recorded rows of
-# this phrase all say "lower", and "decrease" appears in zero rows.
 CMD_VOLUME_DOWN = with_intent(
     "VOLUME_DOWN",
     alt(literal("volume", "down"), literal("lower", "the", "volume"), literal("turn", "the", "volume", "down")),
@@ -110,12 +106,12 @@ CMD_NEXT = with_intent(
 
 CMD_PAUSE = with_intent(
     "PAUSE",
-    alt(literal("pause"), literal("pause", "the", "music"), literal("pause", "this", "song")),
+    alt(literal("pause"), literal("pause", "audio"), literal("pause", "for", "now")),
 )
 
 CMD_STOP = with_intent(
     "STOP",
-    alt(literal("stop", "song"), literal("stop", "music"), literal("stop", "playing", "music")),
+    alt(literal("stop"), literal("stop", "playing"), literal("end", "playback")),
 )
 
 CMD_LIGHT_ON = with_intent(
@@ -125,24 +121,24 @@ CMD_LIGHT_ON = with_intent(
 
 CMD_LIGHT_OFF = with_intent(
     "LIGHT_OFF",
-    alt(literal("lights", "off"), literal("kill", "the", "lights"), literal("turn", "off", "the", "lights")),
+    alt(literal("lights", "out"), literal("kill", "the", "lights"), literal("shut", "off", "the", "lights")),
 )
 
 CMD_BRIGHTNESS = with_intent(
     "BRIGHTNESS",
     alt(
         seq(literal("brightness"), slot("PERCENT", PERCENT)),
-        seq(literal("set", "the", "brightness", "to"), slot("PERCENT", PERCENT)),
-        seq(literal("change", "the", "brightness", "to"), slot("PERCENT", PERCENT)),
+        seq(literal("adjust", "brightness", "to"), slot("PERCENT", PERCENT)),
+        seq(literal("brightness", "level"), slot("PERCENT", PERCENT)),
     ),
 )
 
 CMD_COLOR = with_intent(
     "COLOR",
     alt(
-        seq(literal("color"), slot("COLOR", COLOR)),
-        seq(literal("change", "the", "lights", "to"), slot("COLOR", COLOR)),
-        seq(literal("set", "the", "lights", "to"), slot("COLOR", COLOR)),
+        seq(literal("change", "color", "to"), slot("COLOR", COLOR)),
+        seq(literal("switch", "color", "to"), slot("COLOR", COLOR)),
+        seq(literal("set", "color", "to"), slot("COLOR", COLOR)),
     ),
 )
 
@@ -185,7 +181,7 @@ CMD_ALARM = with_intent(
 
 CMD_CALL = with_intent(
     "CALL",
-    alt(literal("call"), literal("make", "a", "call"), literal("make", "a", "phone", "call")),
+    alt(literal("call"), literal("place", "a", "call"), literal("make", "a", "phone", "call")),
 )
 
 CMD_MESSAGE = with_intent(
@@ -211,17 +207,17 @@ CMD_LIST_REMINDERS = with_intent(
 # ---------------------------------------------------------------------------
 # Known divergences between the vendored README anchor and the vendored
 # manifest-transcript anchor (docs/raw_requirements/optionb-dataset-
-# manifest-summary.md). Each entry is (intent, readme_phrase, actual_phrase)
-# where actual_phrase is what OPTIONB_GRAMMAR implements -- the manifest's
-# version, since the manifest is ground truth. The drift guard
+# manifest-summary.md). Each entry would be (intent, readme_phrase,
+# actual_phrase) where actual_phrase is what OPTIONB_GRAMMAR implements --
+# the manifest's version, since the manifest is ground truth. As of the live
+# upstream README @ the SHA in docs/OPTIONB-GRAMMAR-CONTRACT.md §6, README
+# and manifest agree on every phrase, so this list is empty. The drift guard
 # (tests/test_optionb_grammar.py) asserts against both anchors and uses this
-# table to reconcile the one known disagreement, rather than silently
+# table to reconcile any future disagreement, rather than silently
 # overriding or hiding it.
 # ---------------------------------------------------------------------------
 
-KNOWN_README_DIVERGENCES: list[tuple[str, str, str]] = [
-    ("VOLUME_DOWN", "decrease the volume", "lower the volume"),
-]
+KNOWN_README_DIVERGENCES: list[tuple[str, str, str]] = []
 
 
 OPTIONB_RULES: dict[str, list[tuple[tuple[str, ...], dict, str]]] = {

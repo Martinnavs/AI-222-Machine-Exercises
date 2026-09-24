@@ -33,12 +33,54 @@ VCM_EVAL_REQUIRED_COMMAND_MARGIN ?=
 OPTIONB_MANIFEST ?= out/conversions/v2/optionb/manifest.csv
 OPTIONB_OUT_DIR ?= out/vcm/optionb
 
+# Live-upstream Option B refresh + VCM Dataset B merge (feature
+# optionb-v3-vcmx). `optionb-refresh` re-fetches Option B from upstream
+# into OPTIONB_V3_OUT_ROOT, distinct from OPTIONB_MANIFEST's own pinned
+# out/conversions/v2/optionb/ baseline above (never overwritten by this).
+# `vcmx-build` merges that refreshed Option B with VCM Dataset B (balanced)
+# and the fold-rebuilt ESC-50 silence pool into one train/val/test pool
+# (`vcm.vcmx_merge`, .scratch/optionb-v3-vcmx/tickets/00-RECAP.md Phase 2).
+# No new train/eval targets: point optionb-train/optionb-eval at
+# VCMX_TREATMENT or VCMX_CONTROL via OPTIONB_MANIFEST=/OPTIONB_OUT_DIR=.
+OPTIONB_V3_OUT_ROOT ?= out/conversions/v2/optionb-v3
+VCMX_B_ROOT ?= raw_datasets/VCM_BALANCED
+VCMX_B_METADATA_ROOT ?= raw_datasets/VCM_BALANCED_METADATA
+VCMX_A_METADATA_ROOT ?= raw_datasets/VCM_MASTER_METADATA
+VCMX_ESC50_MANIFEST ?= out/conversions/v2/background_noise/manifest.csv
+VCMX_TREATMENT ?= out/conversions/v2/optionb-v3-vcmx
+VCMX_CONTROL ?= out/conversions/v2/optionb-v3-vcmx-control
+VCMX_SEED ?= 0
+
+# Serving the trained treatment checkpoint (out/vcm/option-d-dataset-v2 --
+# optiond preset, trained on VCMX_TREATMENT; see
+# out/vcm/option-d-dataset-v2-SUMMARY.md for why this is the one to ship).
+# `vcmx-export` produces its INT8 ONNX export (not generated during
+# train/eval); `vcmx-serve` runs it through vcm.streaming with that export
+# plus this run's own calibrated operating threshold (-0.1, its
+# eval_report.md) and the TIME/STOP-scoped incomplete-prefix margin found in
+# out/vcm/option-d-dataset-v2-FALSE-ACCEPT-ANALYSIS.md (margin=4.5). That
+# margin was measured at beam-width 50 -- VCMX_SERVE_BEAM_WIDTH must stay 50
+# (not vcm.streaming's own default of 25) or the calibration doesn't
+# transfer; see that doc's beam-width note before changing it. The margin
+# itself only checked TIME/STOP, not the whole grammar -- a full
+# vcm.incomplete_calibration run should confirm it before this becomes a
+# real deployment default rather than a documented starting point.
+VCMX_TRAINED_OUT_DIR ?= out/vcm/option-d-dataset-v2
+VCMX_SERVE_MANIFEST ?= $(VCMX_TREATMENT)/manifest.csv
+VCMX_SERVE_VARIANT ?= int8
+VCMX_SERVE_THRESHOLD ?= -0.1
+VCMX_SERVE_MARGIN ?= 4.5
+VCMX_SERVE_BEAM_WIDTH ?= 50
+VCMX_SERVE_GATE ?= none
+VCMX_SERVE_SOURCE ?= mic
+VCMX_SERVE_ARGS ?=
+
 STREAM_MODEL ?= optionc
 STREAM_BACKEND ?= onnx
 STREAM_SOURCE ?= mic
 STREAM_ARGS ?=
 
-.PHONY: sync vendor download-model generate generate-personas generate-conversions test clean vcm-train vcm-bench vcm-eval optionb-train optionb-eval stream wakeword-fetch-positives wakeword-fetch-positives-dry-run wakeword-convert-positives wakeword-convert-positives-dry-run wakeword-generate-silence wakeword-generate-silence-dry-run wakeword-generate-adversaries wakeword-generate-adversaries-dry-run wakeword-mix-noise wakeword-mix-noise-dry-run wakeword-consolidate-manifest wakeword-build-unknown-external wakeword-build-unknown-external-dry-run wakeword-build-dataset wakeword-derive-spans wakeword-train wakeword-export wakeword-bench
+.PHONY: sync vendor download-model generate generate-personas generate-conversions test clean vcm-train vcm-bench vcm-eval optionb-train optionb-eval optionb-refresh vcmx-build vcmx-export vcmx-serve stream wakeword-fetch-positives wakeword-fetch-positives-dry-run wakeword-convert-positives wakeword-convert-positives-dry-run wakeword-generate-silence wakeword-generate-silence-dry-run wakeword-generate-adversaries wakeword-generate-adversaries-dry-run wakeword-mix-noise wakeword-mix-noise-dry-run wakeword-consolidate-manifest wakeword-build-unknown-external wakeword-build-unknown-external-dry-run wakeword-build-dataset wakeword-derive-spans wakeword-train wakeword-export wakeword-bench
 
 WAKEWORD_CLONE_DIR ?= $(if $(TMPDIR),$(TMPDIR),/tmp)/me2_wakeword_clone
 WAKEWORD_POSITIVES_OUT_DIR ?= out/conversions/v2/wakeword/positives_real
@@ -119,6 +161,32 @@ optionb-train:
 
 optionb-eval:
 	$(UV) run python -m me2_voicegen.vcm.evaluate --manifest "$(OPTIONB_MANIFEST)" --checkpoint "$(OPTIONB_OUT_DIR)/checkpoints/checkpoint.pt" --out-dir "$(OPTIONB_OUT_DIR)" --device $(VCM_DEVICE) --beam-width $(VCM_EVAL_BEAM_WIDTH) --slot-eval-manifest "$(OPTIONB_OUT_DIR)/metadata/slot_eval/manifest.csv" --grammar optionb $(if $(VCM_EVAL_REQUIRED_COMMAND_MARGIN),--required-command-margin $(VCM_EVAL_REQUIRED_COMMAND_MARGIN),)
+
+# Re-fetch Option B from the live upstream repo (docs/OPTIONB-GRAMMAR-CONTRACT.md
+# §6) into OPTIONB_V3_OUT_ROOT -- out/conversions/v2/optionb/ (OPTIONB_MANIFEST's
+# own dir) is never touched by this.
+optionb-refresh:
+	$(UV) run python -m me2_voicegen.vcm.optionb.fetch_dataset --force-clone --out-root "$(OPTIONB_V3_OUT_ROOT)"
+
+# Merge VCM Dataset B (balanced) + the fold-rebuilt ESC-50 silence pool
+# into OPTIONB_V3_OUT_ROOT, producing VCMX_TREATMENT and VCMX_CONTROL.
+vcmx-build:
+	$(UV) run python -m me2_voicegen.vcm.vcmx_merge build --optionb-manifest "$(OPTIONB_V3_OUT_ROOT)/manifest.csv" --b-root "$(VCMX_B_ROOT)" --b-metadata-root "$(VCMX_B_METADATA_ROOT)" --a-metadata-root "$(VCMX_A_METADATA_ROOT)" --esc50-manifest "$(VCMX_ESC50_MANIFEST)" --out-treatment "$(VCMX_TREATMENT)" --out-control "$(VCMX_CONTROL)" --seed $(VCMX_SEED)
+
+# fp32+INT8 ONNX export for VCMX_TRAINED_OUT_DIR's checkpoint -- vcm.benchmark
+# does the export as a side effect (same pattern as vcm-bench above), writing
+# to $(VCMX_TRAINED_OUT_DIR)/export/. Run once before vcmx-serve's first use
+# with --backend onnx (the export isn't produced by optionb-train/-eval).
+vcmx-export:
+	$(UV) run python -m me2_voicegen.vcm.benchmark --checkpoint "$(VCMX_TRAINED_OUT_DIR)/checkpoints/checkpoint.pt" --out-dir "$(VCMX_TRAINED_OUT_DIR)" --manifest "$(VCMX_SERVE_MANIFEST)" --calibration-samples $(VCM_BENCH_CALIBRATION_SAMPLES) --n-iters $(VCM_BENCH_N_ITERS)
+
+# Serve VCMX_TRAINED_OUT_DIR's INT8 export through vcm.streaming with its
+# calibrated threshold/margin/beam-width baked in as defaults (see the
+# VCMX_SERVE_* block above for why each value is what it is). Requires
+# vcmx-export to have run at least once. VCMX_SERVE_SOURCE defaults to the
+# live microphone; override with a wav path for deterministic file-replay.
+vcmx-serve:
+	$(UV) run python -m me2_voicegen.vcm.streaming --model "$(VCMX_TRAINED_OUT_DIR)" --backend onnx --onnx-variant $(VCMX_SERVE_VARIANT) --grammar optionb --threshold $(VCMX_SERVE_THRESHOLD) --required-command-margin $(VCMX_SERVE_MARGIN) --beam-width $(VCMX_SERVE_BEAM_WIDTH) --gate $(VCMX_SERVE_GATE) --source "$(VCMX_SERVE_SOURCE)" $(VCMX_SERVE_ARGS)
 
 # Streaming spoken-command runner (ticket 04 of feature optionb-streaming).
 # STREAM_SOURCE defaults to the live microphone; override with a wav path

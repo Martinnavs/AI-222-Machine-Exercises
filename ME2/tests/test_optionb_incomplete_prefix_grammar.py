@@ -14,8 +14,8 @@ from test_optionb_grammar import EXPECTED_STRICT_PREFIX_PAIRS
 def test_slot_bearing_prefixes_are_rejection_competitors():
     rejection_grammar = OPTIONB_INCOMPLETE_PREFIX_GRAMMAR
 
-    assert rejection_grammar.is_incomplete("color")
-    assert rejection_grammar.is_incomplete("set the lights to")
+    assert rejection_grammar.is_incomplete("change color to")
+    assert rejection_grammar.is_incomplete("set color to")
     assert rejection_grammar.is_incomplete("brightness")
     assert rejection_grammar.is_incomplete("set an alarm for")
 
@@ -25,7 +25,7 @@ def test_only_complete_words_are_included():
 
     assert "colo" not in incomplete
     assert "lights o" not in incomplete
-    assert "set the lights to " not in incomplete
+    assert "set color to " not in incomplete
 
 
 def test_accepted_commands_are_never_marked_incomplete():
@@ -88,7 +88,7 @@ def test_accepted_strict_prefixes_are_never_rejection_competitors():
     assert OPTIONB_GRAMMAR.accepts("time") is not None
     assert OPTIONB_GRAMMAR.accepts("pause") is not None
 
-    # (c) Character-level: the exact 8-pair strict-prefix set of
+    # (c) Character-level: the exact 9-pair strict-prefix set of
     # test_optionb_grammar.py (D6) -- the accepted shorter phrase of each
     # pair is never a rejection competitor.
     for short, _long in EXPECTED_STRICT_PREFIX_PAIRS:
@@ -99,18 +99,18 @@ def test_optionb_grammar_carries_derived_incomplete_prefixes():
     incomplete = OPTIONB_GRAMMAR.incomplete_prefixes
 
     assert incomplete == derive_incomplete_prefixes(OPTIONB_GRAMMAR)
-    assert "color" in incomplete
-    assert "set the lights to" in incomplete
+    assert "change color to" in incomplete
+    assert "set color to" in incomplete
     # Slot-value prefixes are whole-word prefixes of accepted phrases, so the
-    # spec's derivation includes them (e.g. of "alarm 6 am", "change the
+    # spec's derivation includes them (e.g. of "alarm 6 am", "adjust
     # brightness to 100 percent").
     assert "alarm 6" in incomplete
-    assert "change the brightness to 100" in incomplete
+    assert "adjust brightness to 100" in incomplete
     assert "colo" not in incomplete
     assert "time" not in incomplete
     assert "pause" not in incomplete
     assert "color red" not in incomplete
-    assert len(incomplete) == 169
+    assert len(incomplete) == 171
 
     # Cross-invariant: the experimental view and the production field agree.
     assert (

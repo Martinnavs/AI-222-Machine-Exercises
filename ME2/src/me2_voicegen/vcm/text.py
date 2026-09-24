@@ -76,12 +76,17 @@ def resolve_transcript(manifest_row: Mapping[str, str]) -> str | None:
     - filipino_speech_corpus: per decision (B), always None, regardless of
       whether the row is a whole-clip or `_cNN.wav` chunked row -- excluded
       from CTC loss uniformly, kept only as an eval rejection probe.
-    - optionb: own manifest's `transcript` column, read directly (no source
-      manifest join -- unlike common_voice_negative/youtube_institutional,
-      this row *is* the source row), passed through
+    - optionb / vcm_balanced: own manifest's `transcript` column, read
+      directly (no source manifest join -- unlike
+      common_voice_negative/youtube_institutional, this row *is* the
+      source row), passed through
       `vcm.optionb.transcript.prepare_ctc_transcript` first so digit-bearing
       slot values (e.g. "Alarm 6 AM") survive this module's own
-      `normalize_text` instead of being silently dropped.
+      `normalize_text` instead of being silently dropped. `vcm_balanced`
+      (VCM Dataset B, merged in by `vcm.vcmx_merge`) reuses this branch
+      unchanged: its own rows are pre-normalized (alias-normalized,
+      digit-kept text) the same way `optionb` rows already are, so no
+      separate digit-spelling rule is needed for it.
     """
     source_dataset = manifest_row["source_dataset"]
 
@@ -94,7 +99,7 @@ def resolve_transcript(manifest_row: Mapping[str, str]) -> str | None:
     if source_dataset == "filipino_speech_corpus":
         return None
 
-    if source_dataset == "optionb":
+    if source_dataset in ("optionb", "vcm_balanced"):
         return prepare_ctc_transcript(manifest_row["transcript"])
 
     if source_dataset in ("common_voice_negative", "youtube_institutional"):

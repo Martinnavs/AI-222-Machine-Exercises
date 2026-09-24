@@ -34,12 +34,18 @@ NEGINF = float("-inf")
 
 
 def test_single_word_commands_derived_from_grammar():
+    # Live-upstream refresh: STOP's v1 is now the bare word "stop" (was
+    # "stop song"), so it joins the single-word set.
     words = ic.single_word_commands(OPTIONB_GRAMMAR)
-    assert words == frozenset({"call", "message", "pause", "reminders", "time", "weather"})
+    assert words == frozenset(
+        {"call", "message", "pause", "reminders", "stop", "time", "weather"}
+    )
 
 
 def test_strict_prefix_commands_derived_from_grammar():
-    assert ic.strict_prefix_commands(OPTIONB_GRAMMAR) == frozenset({"pause"})
+    # Live-upstream refresh: "stop" is now also a strict-prefix command
+    # ("stop" is itself accepted and a whole-word prefix of "stop playing").
+    assert ic.strict_prefix_commands(OPTIONB_GRAMMAR) == frozenset({"pause", "stop"})
 
 
 def test_strict_prefix_commands_excludes_phrases_with_no_longer_sibling():
