@@ -57,19 +57,29 @@ VCMX_SEED ?= 0
 # `vcmx-export` produces its INT8 ONNX export (not generated during
 # train/eval); `vcmx-serve` runs it through vcm.streaming with that export
 # plus this run's own calibrated operating threshold (-0.1, its
-# eval_report.md) and the TIME/STOP-scoped incomplete-prefix margin found in
-# out/vcm/option-d-dataset-v2-FALSE-ACCEPT-ANALYSIS.md (margin=4.5). That
-# margin was measured at beam-width 50 -- VCMX_SERVE_BEAM_WIDTH must stay 50
-# (not vcm.streaming's own default of 25) or the calibration doesn't
-# transfer; see that doc's beam-width note before changing it. The margin
-# itself only checked TIME/STOP, not the whole grammar -- a full
-# vcm.incomplete_calibration run should confirm it before this becomes a
-# real deployment default rather than a documented starting point.
+# eval_report.md) and a full-grammar incomplete-prefix margin (=6.0) chosen
+# by `vcm.incomplete_calibration select --split val` against the pooled
+# VCMX_TREATMENT manifest (all designated prefixes, not just TIME/STOP) and
+# confirmed once on the disjoint `holdout --split test` split -- reports at
+# out/vcm/option-d-dataset-v2/metadata/incomplete_calibration_beam50/
+# {val_report,test_report}.md. Held-out: FAR 14.65%->6.46%, target exact
+# accuracy 97.92%->97.04% (0.88pp), gate-caused FRR 0.95%. Superseded the
+# earlier margin=4.5 in out/vcm/option-d-dataset-v2-FALSE-ACCEPT-ANALYSIS.md,
+# which only scoped TIME/STOP and understated the margin the full grammar
+# actually needs. That margin was measured at beam-width 50 --
+# VCMX_SERVE_BEAM_WIDTH must stay 50 (not vcm.streaming's own default of 25)
+# or the calibration doesn't transfer. Open caveat: the pooled val/test
+# manifest is ~90% voice-cloned Option B commands and the incomplete-prefix
+# probes are cut from Option B only (source_dataset=="optionb") -- the
+# margin is not yet independently confirmed against just the real-recording
+# subset (source_dataset=="vcm_balanced"); a per-source breakdown
+# (.scratch/optionb-v3-vcmx/margin_by_source.py) is in progress to close
+# that gap before this stops being a documented starting point.
 VCMX_TRAINED_OUT_DIR ?= out/vcm/option-d-dataset-v2
 VCMX_SERVE_MANIFEST ?= $(VCMX_TREATMENT)/manifest.csv
 VCMX_SERVE_VARIANT ?= int8
 VCMX_SERVE_THRESHOLD ?= -0.1
-VCMX_SERVE_MARGIN ?= 4.5
+VCMX_SERVE_MARGIN ?= 6.0
 VCMX_SERVE_BEAM_WIDTH ?= 50
 VCMX_SERVE_GATE ?= none
 VCMX_SERVE_SOURCE ?= mic
