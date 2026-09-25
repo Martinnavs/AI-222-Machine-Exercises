@@ -5,15 +5,14 @@ HPC node (3x idle A100-SXM4-40GB, no root/sudo). It is **not** the synthetic-dat
 pipeline itself.
 
 > **New here?** Read the process documentation first: an end-to-end, human-readable
-> walkthrough of the whole process — raw audio → TTS conversion → QA'd test set →
-> CTC training → grammar decode → ONNX export → live streaming — with the command
-> for each stage, the modelling core (architecture, training recipe, grammar-to-trie
-> compile, decode threshold), and the real results. It lives in the second-brain vault
-> at `/mnt/Obsidian/Claude/second-brain/resources/AI-222/machine-exercise-implem/ME2/`
-> as a set of four paired documents: `PROCESS-OVERVIEW.md` (pipeline hub),
-> `VCM-MODEL.md` (architecture + training + results), `GRAMMAR-TO-DECODE.md`
-> (grammar → trie → decode), and `STREAMING.md` (live runner); each has its
-> evidence record alongside it in `evidence/`.
+> walkthrough of the whole project — raw audio → TTS/voice-conversion → dataset build →
+> CTC training → grammar decode → wakeword DS-CNN → ONNX export → live streaming — with
+> the command for each stage, the modelling core (architecture, training recipe,
+> grammar-to-trie compile, decode/rejection gating), and the real, honestly-framed
+> results. It's committed in this repo as five paired documents:
+> `docs/PROCESS-OVERVIEW.md` (pipeline hub), `docs/PROCESS-DATA-GENERATION.md`,
+> `docs/PROCESS-VCM-MODEL.md`, `docs/PROCESS-WAKEWORD.md`, and
+> `docs/PROCESS-STREAMING-SERVING.md`. Start at `PROCESS-OVERVIEW.md`.
 
 ## Scope
 
