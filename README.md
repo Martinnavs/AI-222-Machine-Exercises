@@ -1,6 +1,6 @@
-# AI-222 Machine Exercises
+# AI-231 Machine Exercises
 
-Main repository for all work done within the AI 222 subject.
+Main repository for all work done within the AI 231 subject.
 
 ---
 
