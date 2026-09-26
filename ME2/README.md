@@ -24,7 +24,7 @@ the project, not a later add-on to a still-scoped-down spike.
 > `docs/PROCESS-VCM-MODEL.md`, `docs/PROCESS-WAKEWORD.md`, and
 > `docs/PROCESS-STREAMING-SERVING.md`. Start at `PROCESS-OVERVIEW.md`.
 
-## Project status (2026-09-25, branch `optionb-grammar-v2`)
+## Project status (2026-09-26, branch `optionb-grammar-v2`)
 
 | Area | Status | Key number |
 |---|---|---|
@@ -32,11 +32,13 @@ the project, not a later add-on to a still-scoped-down spike.
 | Wakeword DS-CNN | trained, wired into `ListeningGate` | val F1 0.997 (`_wakeword_`); fixed threshold 0.9 (no FAR/FRR calibration pipeline yet) |
 | Streaming runtime | shipped | fp32 ONNX is the serving default (INT8 needs its own threshold re-tuning pass) |
 | VCMX (combined VCM+wakeword export/serve) | shipped, tech-lead reviewed, approved | treatment 25,231 rows / control 21,055 rows, speaker-disjoint |
-| `accent-balance-fil50` (50/50 Filipino/non-Filipino rebalance) | **pilot-tested, full run blocked on a decision** | `sapinsapin` zero-shot QA pass rate only 30.6–41.7% (cross-lingual content-fidelity failure) |
+| `accent-balance-fil50` (50/50 Filipino/non-Filipino rebalance) | **complete, all criteria met** | wakeword Filipino-accent recall gap 13.0pts → 0.4pts; VCM exact accuracy 0.956 → 0.979 |
 
-Everything in this table except the last row is landed and working end to end. The blocking
-decision for `accent-balance-fil50` — references-only vs. voice-conversion-instead-of-zero-shot
-vs. a blend — is detailed in `docs/PROCESS-DATA-GENERATION.md`'s "Current status" section.
+Everything in this table is landed and working end to end. `accent-balance-fil50`'s full run
+(references-only path, per the decision in `docs/PROCESS-DATA-GENERATION.md`'s "Current status"
+section) is complete; results in `docs/MLOPS-PROJECTS.md`'s Iteration 1. Promoting the new
+checkpoints to production (`make vcmx-serve` / `make vcmx-serve-wakeword`) is a separate,
+not-yet-made decision.
 
 ## Scope
 
@@ -78,8 +80,8 @@ happens today — nothing below replaces it, later work only builds on top of it
   VCM checkpoint, a combined VCM+wakeword export/serve pipeline ("VCMX"), and a calibrated
   incomplete-prefix rejection gate — see "Option B spoken-command grammar", "VCMX" and the
   "Streaming inference" sections below.
-- **`accent-balance-fil50`** (in flight): a 50/50 Filipino/non-Filipino speaker rebalancing pass
-  for both the VCM and wakeword datasets — pilot-tested, full run blocked on a decision (see
+- **`accent-balance-fil50`** (complete): a 50/50 Filipino/non-Filipino speaker rebalancing pass
+  for both the VCM and wakeword datasets — full run done, all pre-committed criteria met (see
   "Project status" above and `docs/PROCESS-DATA-GENERATION.md`).
 
 See `docs/raw_requirements/sources.md`, `docs/raw_requirements/potential_model_approach.md`,

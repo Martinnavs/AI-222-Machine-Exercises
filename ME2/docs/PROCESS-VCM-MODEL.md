@@ -195,5 +195,5 @@ From `20260925_suggestions.md` §3, still open:
 - Intent-length-dependent thresholding — still one global threshold.
 
 Section 1's specific 50/50 Filipino/non-Filipino dataset-balancing plan is the `accent-balance-fil50`
-feature — see `PROCESS-DATA-GENERATION.md` for its status (pilot-tested, full run blocked on a
-decision).
+feature — see `PROCESS-DATA-GENERATION.md` for its status (complete, all pre-committed criteria
+met) and `MLOPS-PROJECTS.md` for full results.

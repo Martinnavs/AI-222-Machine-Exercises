@@ -14,6 +14,16 @@ Job text:
     half then mirrors the real intent/phrasing distribution instead of
     inventing its own.
   - wakeword: every job is the literal wakeword utterance, "Computer.".
+
+Voice pool (`--voice-sources`):
+  - `all` (default): each split's own voices.csv rows, unchanged.
+  - `references`: every ref_ voice in the CSV for EVERY split, ignoring the
+    split column (references are train-only in the CSV, but Phase 1 uses
+    them in all splits -- a justified cross-split timbre exception, since
+    references timbre already spans every split via converted wakeword
+    positives; the split-disjointness checks carry a matching scoped
+    `ref_` exemption). fsc_ voices excluded.
+  - `sapinsapin`: only the split's own fsc_ voices. ref_ excluded.
 """
 
 from __future__ import annotations
@@ -55,6 +65,21 @@ def load_voices(voices_csv: Path) -> dict[str, list[dict]]:
         if not voices:
             raise ValueError(f"{voices_csv}: no voices assigned to split {split!r}")
     return by_split
+
+
+VOICE_SOURCES = ("all", "references", "sapinsapin")
+
+
+def voice_pool_for_split(voices_by_split: dict[str, list[dict]], split: str, voice_sources: str) -> list[dict]:
+    """The voice pool for `split` under the given `--voice-sources` mode
+    (see the module docstring): `all` is the split's own rows;
+    `references` is every ref_ voice in the CSV regardless of its split
+    column; `sapinsapin` is the split's own fsc_ voices only."""
+    if voice_sources == "all":
+        return voices_by_split[split]
+    if voice_sources == "references":
+        return [v for vs in voices_by_split.values() for v in vs if v["voice_id"].startswith("ref_")]
+    return [v for v in voices_by_split[split] if v["voice_id"].startswith("fsc_")]
 
 
 def count_vcm_deficit(manifest_path: Path) -> dict[str, dict[str, int]]:
@@ -170,7 +195,10 @@ def plan(
     overgen: float,
     seed: int,
     pilot: int | None,
+    voice_sources: str = "all",
 ) -> tuple[list[dict], dict]:
+    if voice_sources not in VOICE_SOURCES:
+        raise ValueError(f"unknown voice_sources {voice_sources!r}, expected one of {VOICE_SOURCES}")
     rng = Random(seed)
     voices_by_split = load_voices(voices_csv)
 
@@ -189,7 +217,10 @@ def plan(
         # train split's voice pool for every job (T2 spec: "train-pool
         # voices only, split evenly between prompt_source values, across at
         # least 12 voices"), and doesn't touch val/test manifests at all.
-        train_voices = voices_by_split["train"]
+        # The pool honors `--voice-sources` the same way the non-pilot path
+        # does (for `references`, that's every ref_ voice, not just the
+        # train-split rows).
+        train_voices = voice_pool_for_split(voices_by_split, "train", voice_sources)
         by_source: dict[str, list[dict]] = {}
         for v in train_voices:
             by_source.setdefault(v["prompt_source"], []).append(v)
@@ -237,7 +268,7 @@ def plan(
                 model=model,
                 split=split,
                 n_jobs=n_jobs,
-                voices=voices_by_split[split],
+                voices=voice_pool_for_split(voices_by_split, split, voice_sources),
                 rng=rng,
                 text_source=text_source,
                 noisy_fraction=noisy_frac_by_split[split],
@@ -266,6 +297,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--overgen", type=float, default=1.15)
     parser.add_argument("--seed", type=int, required=True)
     parser.add_argument("--pilot", type=int, default=None, help="plan N jobs per model from the train voice pool only, ignore the real deficit")
+    parser.add_argument("--voice-sources", choices=VOICE_SOURCES, default="all",
+                        help="voice pool per split: 'all' (default, today's behavior), "
+                        "'references' (every ref_ voice in every split, split column ignored), "
+                        "'sapinsapin' (only the split's own fsc_ voices)")
     parser.add_argument("--out", type=Path, required=True)
     parser.add_argument("-v", "--verbose", action="store_true")
     return parser.parse_args(argv)
@@ -282,6 +317,7 @@ def main(argv: list[str] | None = None) -> int:
         overgen=args.overgen,
         seed=args.seed,
         pilot=args.pilot,
+        voice_sources=args.voice_sources,
     )
     dest = write_jobs_csv(args.out, jobs)
 

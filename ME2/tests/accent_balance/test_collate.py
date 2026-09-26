@@ -145,6 +145,25 @@ def test_assert_group_id_split_disjoint_passes_when_clean():
     assert_group_id_split_disjoint(rows) is None
 
 
+def test_assert_group_id_split_disjoint_ref_prefix_exempt_across_splits():
+    # Phase-1 scoped exception: ref_ group ids (references voices) may
+    # legitimately appear in more than one split.
+    rows = [
+        {"group_id": "ref_tagalog1", "split": "train"},
+        {"group_id": "ref_tagalog1", "split": "test"},
+        {"group_id": "fsc_1", "split": "train"},
+    ]
+    assert assert_group_id_split_disjoint(rows) is None
+
+
+@pytest.mark.parametrize("gid", ["fsc_1", "s68", "v1"])
+def test_assert_group_id_split_disjoint_still_raises_for_non_ref_ids(gid):
+    # Regression guard: the exemption is scoped to the ref_ prefix only.
+    rows = [{"group_id": gid, "split": "train"}, {"group_id": gid, "split": "test"}]
+    with pytest.raises(ManifestValidationError):
+        assert_group_id_split_disjoint(rows)
+
+
 def test_assert_base_rows_preserved_allows_only_ignored_fields_to_change():
     original = [{"filename": "a.wav", "path": "old/a.wav", "label": "ALARM"}]
     rebased = [{"filename": "a.wav", "path": "new/a.wav", "label": "ALARM"}]

@@ -62,6 +62,40 @@ def _write_voices(path: Path, by_split: dict[str, list[str]]) -> Path:
     return _write_csv(path, ["voice_id", "prompt_source", "split", "prompt_seconds", "prompt_text", "origin"], rows)
 
 
+def _write_ref_voices(path: Path) -> Path:
+    """Voices CSV shaped like the real one: fsc_ speakers 70/15/15-ish per
+    split, the 17-voice `references` pool train-only in the split column."""
+    rows = []
+
+    def add(vid, source, split):
+        rows.append({
+            "voice_id": vid, "prompt_source": source, "split": split,
+            "prompt_seconds": "10.0", "prompt_text": "hello", "origin": vid,
+        })
+
+    for i in range(6):
+        add(f"fsc_{i}", "sapinsapin", "train")
+    for vid in ("ref_stella", "ref_marco"):
+        add(vid, "references", "train")
+    for i in range(10, 13):
+        add(f"fsc_{i}", "sapinsapin", "val")
+    for i in range(20, 23):
+        add(f"fsc_{i}", "sapinsapin", "test")
+    return _write_csv(path, ["voice_id", "prompt_source", "split", "prompt_seconds", "prompt_text", "origin"], rows)
+
+
+def _phase1_dataset(tmp_path: Path) -> dict:
+    """Manifests with a small deficit in EVERY split, so `plan()` exercises
+    the per-split voice pool for train, val, and test alike."""
+    vcm_rows = [_vcm_row(f"nf_{s}_{i}.wav", "ALARM", s, group_id="s1") for s in ("train", "val", "test") for i in range(2)]
+    ww_rows = [_ww_row(f"nf_ww_{s}_{i}.wav", s) for s in ("train", "val", "test") for i in range(2)]
+    return {
+        "vcm": _write_csv(tmp_path / "p1_vcm" / "manifest.csv", VCM_FIELDS, vcm_rows),
+        "ww": _write_csv(tmp_path / "p1_ww" / "manifest.csv", WW_FIELDS, ww_rows),
+        "voices": _write_ref_voices(tmp_path / "p1_voices.csv"),
+    }
+
+
 @pytest.fixture
 def small_dataset(tmp_path):
     vcm_rows = (
@@ -187,3 +221,114 @@ def test_jobs_csv_has_expected_columns(tmp_path):
     with out.open() as f:
         header = next(_csv.reader(f))
     assert header == JOBS_FIELDS
+
+
+# ---------------------------------------------------------------------------
+# --voice-sources
+# ---------------------------------------------------------------------------
+
+
+def test_voice_pool_for_split_references_ignores_split_column(tmp_path):
+    from me2_voicegen.accent_balance.plan_jobs import load_voices, voice_pool_for_split
+
+    by_split = load_voices(_write_ref_voices(tmp_path / "voices.csv"))
+    ref_ids = {"ref_stella", "ref_marco"}
+    # references pool is every ref_ voice for EVERY split -- including
+    # val/test, whose own rows contain no ref_ voices at all (proof the
+    # split column is ignored) -- and no fsc_ voice ever.
+    for split in ("train", "val", "test"):
+        assert {v["voice_id"] for v in voice_pool_for_split(by_split, split, "references")} == ref_ids
+
+
+def test_voice_pool_for_split_sapinsapin_and_all(tmp_path):
+    from me2_voicegen.accent_balance.plan_jobs import load_voices, voice_pool_for_split
+
+    by_split = load_voices(_write_ref_voices(tmp_path / "voices.csv"))
+    # sapinsapin: only that split's own fsc_ voices, no ref_
+    assert {v["voice_id"] for v in voice_pool_for_split(by_split, "val", "sapinsapin")} == {f"fsc_{i}" for i in range(10, 13)}
+    assert {v["voice_id"] for v in voice_pool_for_split(by_split, "test", "sapinsapin")} == {f"fsc_{i}" for i in range(20, 23)}
+    # all: the split's own rows, unchanged (today's behavior)
+    assert {v["voice_id"] for v in voice_pool_for_split(by_split, "train", "all")} == {f"fsc_{i}" for i in range(6)} | {"ref_stella", "ref_marco"}
+    assert {v["voice_id"] for v in voice_pool_for_split(by_split, "val", "all")} == {f"fsc_{i}" for i in range(10, 13)}
+
+
+def test_plan_voice_sources_references_uses_all_ref_voices_in_every_split(tmp_path):
+    ds = _phase1_dataset(tmp_path)
+    ref_ids = {"ref_stella", "ref_marco"}
+    jobs, _ = plan(
+        voices_csv=ds["voices"], vcm_manifest=ds["vcm"], wakeword_manifest=ds["ww"],
+        overgen=1.0, seed=0, pilot=None, voice_sources="references",
+    )
+    by_split = {s: {j["voice_id"] for j in jobs if j["split"] == s} for s in ("train", "val", "test")}
+    for split, used in by_split.items():
+        assert used, f"{split} pool empty under voice_sources=references"
+        assert used <= ref_ids, f"{split} jobs used non-ref voices: {used}"
+    # 4 jobs per split (2 vcm + 2 ww) over a 2-voice pool -> round-robin
+    # exercises the whole pool in every split
+    assert all(used == ref_ids for used in by_split.values())
+
+
+def test_plan_voice_sources_sapinsapin_uses_only_that_splits_fsc_voices(tmp_path):
+    ds = _phase1_dataset(tmp_path)
+    allowed = {
+        "train": {f"fsc_{i}" for i in range(6)},
+        "val": {f"fsc_{i}" for i in range(10, 13)},
+        "test": {f"fsc_{i}" for i in range(20, 23)},
+    }
+    jobs, _ = plan(
+        voices_csv=ds["voices"], vcm_manifest=ds["vcm"], wakeword_manifest=ds["ww"],
+        overgen=1.0, seed=0, pilot=None, voice_sources="sapinsapin",
+    )
+    assert jobs
+    for j in jobs:
+        assert j["voice_id"] in allowed[j["split"]], f"{j['voice_id']} not in the {j['split']} fsc_ pool"
+        assert not j["voice_id"].startswith("ref_")
+
+
+def test_plan_voice_sources_all_matches_default_and_is_the_union(tmp_path):
+    ds = _phase1_dataset(tmp_path)
+    allowed = {
+        "train": {f"fsc_{i}" for i in range(6)} | {"ref_stella", "ref_marco"},
+        "val": {f"fsc_{i}" for i in range(10, 13)},
+        "test": {f"fsc_{i}" for i in range(20, 23)},
+    }
+    jobs_all, _ = plan(
+        voices_csv=ds["voices"], vcm_manifest=ds["vcm"], wakeword_manifest=ds["ww"],
+        overgen=1.0, seed=0, pilot=None, voice_sources="all",
+    )
+    jobs_default, _ = plan(
+        voices_csv=ds["voices"], vcm_manifest=ds["vcm"], wakeword_manifest=ds["ww"],
+        overgen=1.0, seed=0, pilot=None,
+    )
+    assert jobs_all == jobs_default  # 'all' is exactly today's behavior
+    for j in jobs_all:
+        assert j["voice_id"] in allowed[j["split"]]
+
+
+def test_pilot_mode_honors_voice_sources(tmp_path):
+    ds = _phase1_dataset(tmp_path)
+    ref_ids = {"ref_stella", "ref_marco"}
+    jobs, _ = plan(
+        voices_csv=ds["voices"], vcm_manifest=ds["vcm"], wakeword_manifest=ds["ww"],
+        overgen=1.15, seed=0, pilot=10, voice_sources="references",
+    )
+    assert len(jobs) == 20
+    assert all(j["voice_id"] in ref_ids and j["split"] == "train" for j in jobs)
+
+    train_fsc = {f"fsc_{i}" for i in range(6)}
+    jobs2, _ = plan(
+        voices_csv=ds["voices"], vcm_manifest=ds["vcm"], wakeword_manifest=ds["ww"],
+        overgen=1.15, seed=0, pilot=10, voice_sources="sapinsapin",
+    )
+    assert all(j["voice_id"] in train_fsc and j["split"] == "train" for j in jobs2)
+
+
+def test_parse_args_voice_sources_choices():
+    from me2_voicegen.accent_balance.plan_jobs import parse_args
+
+    base = ["--voices", "v.csv", "--vcm-manifest", "m.csv", "--wakeword-manifest", "w.csv", "--seed", "0", "--out", "o.csv"]
+    assert parse_args(base + ["--voice-sources", "references"]).voice_sources == "references"
+    assert parse_args(base + ["--voice-sources", "sapinsapin"]).voice_sources == "sapinsapin"
+    assert parse_args(base).voice_sources == "all"
+    with pytest.raises(SystemExit):
+        parse_args(base + ["--voice-sources", "bogus"])

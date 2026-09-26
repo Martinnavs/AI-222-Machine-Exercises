@@ -2,13 +2,28 @@
 # 50/50 Filipino/non-Filipino rebalance of the VCM + wakeword positive classes,
 # then retrain + evaluate both models. Plan: .scratch/accent-balance-fil50/tickets/00-RECAP.md
 #
-# Usage:
-#   GPUS="4 5 6 7" scripts/accent_balance_fil50.sh             # all stages
-#   GPUS="3 4" PILOT=60 scripts/accent_balance_fil50.sh        # pilot: stages 0-3 + report, then stop
-#   STAGES="4 5 6" GPUS="7" scripts/accent_balance_fil50.sh    # resume
-#
-# Detach for long runs:  nohup scripts/accent_balance_fil50.sh > fil50.log 2>&1 & disown
-# Each stage writes $ROOT/.done/<stage>; a finished stage is skipped unless FORCE=1.
+ # Usage:
+ #   GPUS="4 5 6 7" scripts/accent_balance_fil50.sh             # all stages
+ #   GPUS="3 4" PILOT=60 scripts/accent_balance_fil50.sh        # pilot: stages 0-3 + report, then stop
+ #   STAGES="4 5 6" GPUS="7" scripts/accent_balance_fil50.sh    # resume
+ #
+ # Stage 3 (QA) transcriber knobs:
+ #   QA_BACKEND=faster-whisper (default)  -> exactly today's flags: --model "$QA_MODEL"
+ #   QA_BACKEND=faster-whisper-dual       -> --backend faster-whisper-dual
+ #                                           --opt model_a="$QA_MODEL_A" --opt model_b="$QA_MODEL_B"
+ #                                           (no --model). QA_MODEL_A defaults to
+ #                                           models/faster-whisper-small and QA_MODEL_B to
+ #                                           models/faster-whisper-small-tagalog; both are
+ #                                           relative to $QA_REPO, which stage 3 cds into
+ #                                           before invoking the transcriber.
+ #   Any other QA_BACKEND value aborts the script (set -e + explicit exit).
+ #
+ # VOICE_SOURCES (stage 1, default unset -> today's 'all' pool, flag omitted):
+ #   references -> plan from the references voices only, usable in EVERY split
+ #                 (Phase 1); sapinsapin -> only each split's own fsc_ voices.
+ #
+ # Detach for long runs:  nohup scripts/accent_balance_fil50.sh > fil50.log 2>&1 & disown
+ # Each stage writes $ROOT/.done/<stage>; a finished stage is skipped unless FORCE=1.
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
@@ -20,8 +35,12 @@ PILOT=${PILOT:-}
 FORCE=${FORCE:-0}
 SEED=${SEED:-0}
 OVERGEN=${OVERGEN:-1.15}
+VOICE_SOURCES=${VOICE_SOURCES:-}
 QA_THRESHOLD=${QA_THRESHOLD:-0.80}
 QA_MODEL=${QA_MODEL:-small}
+QA_BACKEND=${QA_BACKEND:-faster-whisper}
+QA_MODEL_A=${QA_MODEL_A:-models/faster-whisper-small}
+QA_MODEL_B=${QA_MODEL_B:-models/faster-whisper-small-tagalog}
 QA_REPO=${QA_REPO:-$HOME/simple-audio-transcriber}
 VCM_MINUTES=${VCM_MINUTES:-60}
 WAKEWORD_MINUTES=${WAKEWORD_MINUTES:-30}
@@ -58,6 +77,26 @@ need_gpus() {
 first_gpu() { set -- $GPUS; echo "$1"; }
 gpu_count() { set -- $GPUS; echo "$#"; }
 
+# Stage 3 transcriber model flags, per QA_BACKEND (see header). Result goes
+# in the global QA_FLAGS array, expanded quoted at the call site.
+# faster-whisper (default): byte-identical to today's `--model "$QA_MODEL"`.
+# faster-whisper-dual: two-model confidence backend; model paths are
+# relative to $QA_REPO (stage3_qa cds into it before invoking).
+qa_backend_flags() {
+    case "$QA_BACKEND" in
+        faster-whisper)
+            QA_FLAGS=(--model "$QA_MODEL")
+            ;;
+        faster-whisper-dual)
+            QA_FLAGS=(--backend faster-whisper-dual --opt "model_a=$QA_MODEL_A" --opt "model_b=$QA_MODEL_B")
+            ;;
+        *)
+            echo "QA_BACKEND must be faster-whisper or faster-whisper-dual, got: $QA_BACKEND" >&2
+            exit 1
+            ;;
+    esac
+}
+
 run_stage() {
     local n=$1 name=$2; shift 2
     case " $STAGES " in *" $n "*) ;; *) return 0 ;; esac
@@ -83,6 +122,7 @@ stage1_plan() {
         --voices "$ROOT/refs/voices.csv" \
         --vcm-manifest "$VCM_BASE" --wakeword-manifest "$WW_BASE" \
         --overgen "$OVERGEN" --seed "$SEED" ${PILOT:+--pilot "$PILOT"} \
+        ${VOICE_SOURCES:+--voice-sources "$VOICE_SOURCES"} \
         --out "$ROOT/jobs/jobs.csv"
 }
 
@@ -109,12 +149,13 @@ stage2_generate() {
 
 stage3_qa() {
     need_gpus
+    qa_backend_flags
     "$UV" run python -m me2_voicegen.accent_balance.qa build-shim \
         --gen-manifest "$ROOT/gen_manifest.csv" --shim-dir "$ROOT/qa/shim"
     local subset
     for subset in "$ROOT"/qa/shim/*/; do
         (cd "$QA_REPO" && CUDA_VISIBLE_DEVICES=$(first_gpu) "$UV" run python -m audio_transcript_parser.qa \
-            "$OLDPWD/$subset" --naming v1-pair --model "$QA_MODEL" --device cuda \
+            "$OLDPWD/$subset" --naming v1-pair "${QA_FLAGS[@]}" --device cuda \
             --threshold "$QA_THRESHOLD" --out-dir "$OLDPWD/$ROOT/qa/reports")
     done
     "$UV" run python -m me2_voicegen.accent_balance.qa parse \

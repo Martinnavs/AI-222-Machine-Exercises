@@ -437,10 +437,15 @@ def assert_fifty_fifty(
 
 
 def assert_group_id_split_disjoint(rows: list[dict]) -> None:
+    """Cross-split speaker-leak guard. `ref_`-prefixed group ids carry the
+    Phase-1 scoped exception: references voices are usable in every split
+    (their timbre already spans every split via converted wakeword
+    positives), so they may legitimately appear in more than one split.
+    EVERY other group id (sNN, fsc_NN, anything else) still raises."""
     by_group: dict[str, set[str]] = {}
     for row in rows:
         gid = row.get("group_id")
-        if not gid:
+        if not gid or gid.startswith("ref_"):
             continue
         by_group.setdefault(gid, set()).add(row["split"])
     violations = {gid: splits for gid, splits in by_group.items() if len(splits) > 1}

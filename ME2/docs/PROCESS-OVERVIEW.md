@@ -74,11 +74,11 @@ and it's already how `vcmx-serve-wakeword` is wired — see `PROCESS-STREAMING-S
 | Wakeword DS-CNN | trained, wired into `ListeningGate` | val F1 0.997 (`_wakeword_`), fixed threshold 0.9 (no FAR/FRR calibration pipeline yet) |
 | Streaming runtime | shipped | fp32 ONNX is the serving default (INT8 needs its own threshold re-tuning pass) |
 | VCMX (combined export/serve) | shipped, reviewed, approved | treatment 25,231 rows / control 21,055 rows, speaker-disjoint |
-| `accent-balance-fil50` (50/50 Filipino rebalance) | **pilot-tested, full run blocked on a decision** | sapinsapin zero-shot QA pass rate only 30.6–41.7% — see `PROCESS-DATA-GENERATION.md` |
+| `accent-balance-fil50` (50/50 Filipino rebalance) | **complete, all criteria met** | wakeword accent recall gap 13.0pts → 0.4pts; see `PROCESS-DATA-GENERATION.md` / `MLOPS-PROJECTS.md` |
 
-The one open decision that blocks further progress right now is in `PROCESS-DATA-GENERATION.md`'s
-"Current status / open decision" section — everything else described in this doc set is landed and
-working.
+Everything described in this doc set is landed, working, and (as of `accent-balance-fil50`'s
+completion) has no open blocking decisions — see `PROCESS-DATA-GENERATION.md`'s "Current status"
+section for what was decided and `MLOPS-PROJECTS.md` for full results.
 
 ## Reproducing the pipeline end to end
 

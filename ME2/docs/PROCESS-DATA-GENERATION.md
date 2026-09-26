@@ -14,7 +14,7 @@ this fits into the whole pipeline.
 | 3. Multi-persona batch synthesis | `make generate-personas` → `me2_voicegen.generation.generate_personas` | One text, once per persona in a JSON manifest (name/wav_path/text); builds the backend once, reuses across the batch. Fail-fast manifest validation before model load; a bad persona doesn't abort the batch. |
 | 4. Option B dataset ingestion | `.scratch/optionb-dataset/` tooling | Fetches a real upstream labeled command corpus, reconciles it into the VCM manifest schema, wires it into `evaluate.py --grammar optionb`. This is the real-audio foundation everything downstream (VCMX, accent-balance) builds on. |
 | 5. VCM Dataset B merge / VCMX build | `make optionb-refresh && make vcmx-build` | Merges Option B (refreshed to live upstream grammar) with a second balanced dataset into speaker-disjoint treatment/control manifests. Full numbers in `PROCESS-VCM-MODEL.md` / `PROCESS-STREAMING-SERVING.md`. |
-| 6. `accent-balance-fil50` (in-flight) | `scripts/accent_balance_fil50.sh` | 7 stages: `build_refs → plan_jobs → generate → qa → pilot_report → collate → train/eval`. Pilot-tested; full run currently blocked — see "Current status" below. |
+| 6. `accent-balance-fil50` (complete) | `scripts/accent_balance_fil50.sh` | 7 stages: `build_refs → plan_jobs → generate → qa → pilot_report → collate → train/eval`. Full run complete, all pre-committed criteria met — see "Current status" below and `MLOPS-PROJECTS.md`. |
 | 7. Wakeword dataset build | `src/me2_voicegen/wakeword/` | Reuses the same voice-conversion mechanism as stage 2 for positive augmentation. Full detail in `PROCESS-WAKEWORD.md`. |
 
 ## Key design decisions and why
@@ -113,22 +113,20 @@ token was missing from the filtered stage list.
 
 ## Current status / open decision points
 
-`accent-balance-fil50`'s full run (collate/train/eval stages) is **blocked pending a user
-decision** among three options:
+**Decided (2026-09-25) and complete (2026-09-26): Option 1, references-only.** Of the three
+options below, references-only was chosen — ship now with the 17 Filipino `references` voices,
+deferring `sapinsapin` diversity to a fast-follow iteration (see Iteration 2 in
+`MLOPS-PROJECTS.md`). The full run (collate/train/eval) completed 2026-09-26 with all
+pre-committed success criteria met; full numbers in `MLOPS-PROJECTS.md`'s Iteration 1 Results.
 
-1. **References-only** — drop `sapinsapin` entirely, ship now with only 17 Filipino voices. Zero
-   new engineering; caps Filipino-speaker diversity at 17 vs. the 124-speaker goal.
-2. **Fix `sapinsapin` via voice conversion instead of zero-shot** — swap `synthesize()` for
-   `convert_voice()` (the same mechanism as stage 2 / wakeword positives), using a same-split
-   non-Filipino real recording as the source clip. Keeps target words correct by construction;
-   carries the caveat that timbre transfer alone isn't a full accent signal; needs its own small
-   pilot before trusting at scale — not yet attempted.
-3. **Blend** — references for guaranteed quality + whatever fraction of `sapinsapin` passes QA
-   as-is (~30–42% yield, i.e. ~60 usable speakers' worth instead of 124).
-
-No decision was recorded as of the latest commit. Nothing in this feature is committed to git yet
-— the new package/tests/script are untracked, and shared-code edits (`vcm/text.py`,
-`vcm/evaluate.py`, `wakeword/train.py`) are modified but unstaged.
+1. **References-only — CHOSEN.** Drop `sapinsapin` entirely, ship now with only 17 Filipino
+   voices. Zero new engineering; caps Filipino-speaker diversity at 17 vs. the 124-speaker goal.
+2. **Fix `sapinsapin` via voice conversion instead of zero-shot — fast-follow (Iteration 2).**
+   Swap `synthesize()` for `convert_voice()` (the same mechanism as stage 2 / wakeword positives),
+   using a same-split non-Filipino real recording as the source clip. Keeps target words correct
+   by construction; carries the caveat that timbre transfer alone isn't a full accent signal.
+3. **Blend — not pursued.** References for guaranteed quality + whatever fraction of `sapinsapin`
+   passes QA as-is (~30–42% yield, i.e. ~60 usable speakers' worth instead of 124).
 
 ## Known limitations/gaps
 
