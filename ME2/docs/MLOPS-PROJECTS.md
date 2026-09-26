@@ -240,6 +240,9 @@ split, per the collate check below).
   124,542 B / int8 49,576 B, p50 latency 0.252 ms / 0.144 ms; VCM fp32 ONNX
   3.85 MB / int8 0.99 MB, p50 latency 3.80 ms / 3.69 ms.
 
+Reproduce/re-evaluate/serve this run's specific checkpoints via raw `uv run`
+commands (no new Makefile recipes added for it): `ACCENT-BALANCE-FIL50-COMMANDS.md`.
+
 **Not yet done:** promoting `option-d-fil50`/`wakeword-fil50` to the
 "Current production baselines" section above and to the served configs
 (`make vcmx-serve` / `make vcmx-serve-wakeword`) is a separate deployment
